@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { joinRoom, selfId } from "trystero";
+import { getRelaySockets, joinRoom, selfId } from "trystero";
 
 // Everyone using the same team code joins one peer-to-peer room. Peers find
 // each other through public Nostr relays (signaling only); voice and text then
@@ -7,6 +7,41 @@ import { joinRoom, selfId } from "trystero";
 // server of our own is needed and the app can be hosted as a static site.
 const APP_ID = "clearcalm-comm-v1";
 const HISTORY_LIMIT = 100;
+
+const envList = (value) =>
+  (value || "")
+    .split(",")
+    .map((v) => v.trim())
+    .filter(Boolean);
+
+// Large, well-run public Nostr relays that accept the short-lived (ephemeral)
+// events used for signaling. Every device must share at least one relay to
+// find each other, so we pin this list instead of relying on the library's
+// default pick. Override with REACT_APP_NOSTR_RELAYS (comma separated).
+const RELAY_URLS = envList(process.env.REACT_APP_NOSTR_RELAYS).length
+  ? envList(process.env.REACT_APP_NOSTR_RELAYS)
+  : [
+      "wss://relay.damus.io",
+      "wss://nos.lol",
+      "wss://relay.primal.net",
+      "wss://nostr.mom",
+      "wss://relay.nostr.net",
+      "wss://offchain.pub",
+    ];
+
+// Optional TURN relay for networks that block direct connections (common on
+// cellular data). Set these as environment variables in Netlify.
+const TURN_URLS = envList(process.env.REACT_APP_TURN_URLS);
+export const TURN_CONFIGURED = TURN_URLS.length > 0;
+const TURN_CONFIG = TURN_CONFIGURED
+  ? [
+      {
+        urls: TURN_URLS,
+        username: process.env.REACT_APP_TURN_USERNAME || "",
+        credential: process.env.REACT_APP_TURN_CREDENTIAL || "",
+      },
+    ]
+  : undefined;
 
 const now = () => Date.now();
 
@@ -29,7 +64,7 @@ const saveHistory = (team, messages) => {
   try {
     localStorage.setItem(
       storageKey(team),
-      JSON.stringify(messages.filter((m) => m.type !== "system"))
+      JSON.stringify(messages.filter((m) => m.type !== "system")),
     );
   } catch {
     // Storage full or blocked (private mode) - history just won't persist.
@@ -47,23 +82,79 @@ const mergeMessages = (current, incoming) => {
     .slice(-HISTORY_LIMIT);
 };
 
-// A short radio "chirp" so people know when a transmission starts and ends.
 let audioCtx;
-export const chirp = (freq) => {
+const getAudioCtx = () => {
+  audioCtx =
+    audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+  if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+  return audioCtx;
+};
+
+// A short radio "chirp" so people know when a transmission starts and ends.
+export const chirp = (freq, seconds = 0.12, level = 0.08) => {
   try {
-    audioCtx =
-      audioCtx || new (window.AudioContext || window.webkitAudioContext)();
-    const osc = audioCtx.createOscillator();
-    const gain = audioCtx.createGain();
+    const ctx = getAudioCtx();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
     osc.frequency.value = freq;
-    gain.gain.setValueAtTime(0.08, audioCtx.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.12);
-    osc.connect(gain).connect(audioCtx.destination);
+    gain.gain.setValueAtTime(level, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + seconds);
+    osc.connect(gain).connect(ctx.destination);
     osc.start();
-    osc.stop(audioCtx.currentTime + 0.12);
+    osc.stop(ctx.currentTime + seconds);
   } catch {
     // Web Audio unavailable - silently skip the chirp.
   }
+};
+
+// Incoming voice plays through <audio> elements kept in the page. Phones
+// (especially iPhones) only start playback inside a tap, so every tap calls
+// unlockAudio() to start any element the browser held back.
+let audioHost;
+const getAudioHost = () => {
+  if (!audioHost) {
+    audioHost = document.createElement("div");
+    audioHost.setAttribute("aria-hidden", "true");
+    audioHost.style.display = "none";
+    document.body.appendChild(audioHost);
+  }
+  return audioHost;
+};
+
+export const unlockAudio = () => {
+  try {
+    getAudioCtx();
+  } catch {
+    // ignore
+  }
+  if (!audioHost) return;
+  audioHost.querySelectorAll("audio").forEach((a) => {
+    if (a.paused && a.srcObject) a.play().catch(() => {});
+  });
+};
+
+// Microphone level (0-1) for the audio check in Settings.
+export const createLevelMeter = (stream) => {
+  const ctx = getAudioCtx();
+  const clone = stream.clone();
+  clone.getAudioTracks().forEach((t) => (t.enabled = true));
+  const source = ctx.createMediaStreamSource(clone);
+  const analyser = ctx.createAnalyser();
+  analyser.fftSize = 512;
+  source.connect(analyser);
+  const data = new Uint8Array(analyser.fftSize);
+  return {
+    read: () => {
+      analyser.getByteTimeDomainData(data);
+      let peak = 0;
+      data.forEach((v) => (peak = Math.max(peak, Math.abs(v - 128))));
+      return Math.min(1, peak / 64);
+    },
+    stop: () => {
+      source.disconnect();
+      clone.getTracks().forEach((t) => t.stop());
+    },
+  };
 };
 
 export default function useComm() {
@@ -90,7 +181,7 @@ export default function useComm() {
     setMessages((prev) =>
       mergeMessages(prev, [
         { id: makeId(), type: "system", text, ts: now(), channel: null },
-      ])
+      ]),
     );
   }, []);
 
@@ -121,6 +212,7 @@ export default function useComm() {
     Object.values(audiosRef.current).forEach((a) => {
       a.pause();
       a.srcObject = null;
+      a.remove();
     });
     audiosRef.current = {};
     selfRef.current.talking = false;
@@ -137,7 +229,11 @@ export default function useComm() {
       setStatus("connecting");
       setMessages(loadHistory(team));
 
-      const config = { appId: APP_ID };
+      const config = {
+        appId: APP_ID,
+        relayConfig: { urls: RELAY_URLS },
+      };
+      if (TURN_CONFIG) config.turnConfig = TURN_CONFIG;
       if (passcode) config.password = passcode;
 
       const room = joinRoom(config, team, {
@@ -146,7 +242,7 @@ export default function useComm() {
           addSystem(
             /password|decrypt/i.test(reason)
               ? "A teammate could not connect: passcodes do not match."
-              : "A teammate could not connect (their network may block direct connections)."
+              : "A teammate could not connect (their network may block direct connections).",
           );
         },
       });
@@ -177,6 +273,7 @@ export default function useComm() {
         if (audio) {
           audio.pause();
           audio.srcObject = null;
+          audio.remove();
           delete audiosRef.current[peerId];
         }
         setPeers((prev) => {
@@ -209,7 +306,7 @@ export default function useComm() {
       chatAction.onMessage = (msg) => {
         if (!msg || typeof msg.text !== "string") return;
         setMessages((prev) =>
-          mergeMessages(prev, [{ ...msg, text: msg.text.slice(0, 1000) }])
+          mergeMessages(prev, [{ ...msg, text: msg.text.slice(0, 1000) }]),
         );
       };
 
@@ -218,17 +315,19 @@ export default function useComm() {
         setMessages((prev) =>
           mergeMessages(
             prev,
-            list.filter((m) => m && typeof m.text === "string")
-          )
+            list.filter((m) => m && typeof m.text === "string"),
+          ),
         );
       };
 
       room.onPeerStream = (stream, peerId) => {
         let audio = audiosRef.current[peerId];
         if (!audio) {
-          audio = new Audio();
+          audio = document.createElement("audio");
           audio.autoplay = true;
           audio.playsInline = true;
+          audio.setAttribute("playsinline", "");
+          getAudioHost().appendChild(audio);
           audiosRef.current[peerId] = audio;
         }
         audio.srcObject = stream;
@@ -260,11 +359,11 @@ export default function useComm() {
       } catch {
         setMicState("denied");
         addSystem(
-          "Microphone unavailable - you can still listen and send text. Allow mic access in your browser settings to talk."
+          "Microphone unavailable - you can still listen and send text. Allow mic access in your browser settings to talk.",
         );
       }
     },
-    [addSystem, applyAudio]
+    [addSystem, applyAudio],
   );
 
   useEffect(() => disconnect, [disconnect]);
@@ -318,7 +417,7 @@ export default function useComm() {
       applyAudio();
       broadcastPresence();
     },
-    [applyAudio, broadcastPresence]
+    [applyAudio, broadcastPresence],
   );
 
   const setName = useCallback(
@@ -326,7 +425,7 @@ export default function useComm() {
       selfRef.current.name = name;
       broadcastPresence();
     },
-    [broadcastPresence]
+    [broadcastPresence],
   );
 
   const setOutput = useCallback(
@@ -334,7 +433,7 @@ export default function useComm() {
       outputRef.current = { volume, muted };
       applyAudio();
     },
-    [applyAudio]
+    [applyAudio],
   );
 
   const clearHistory = useCallback(() => {
@@ -346,8 +445,47 @@ export default function useComm() {
     }
   }, []);
 
+  // Snapshot of connection health for the diagnostics panel.
+  const getDiagnostics = useCallback(() => {
+    const sockets = roomRef.current ? getRelaySockets() : {};
+    const relays = RELAY_URLS.map((url) => {
+      const ws = sockets[url];
+      const state = ws
+        ? ["connecting", "connected", "closing", "closed"][ws.readyState]
+        : "not started";
+      return { url: url.replace("wss://", ""), state };
+    });
+    const connections = roomRef.current ? roomRef.current.getPeers() : {};
+    const peerRows = Object.entries(connections).map(([peerId, pc]) => {
+      const audio = audiosRef.current[peerId];
+      return {
+        peerId,
+        name: peersRef.current[peerId]?.name || "(unknown)",
+        connection: pc?.connectionState || "unknown",
+        audio: !audio
+          ? "no audio yet"
+          : audio.paused
+            ? "blocked - tap to enable"
+            : audio.muted
+              ? "muted (other channel)"
+              : "playing",
+      };
+    });
+    return {
+      relays,
+      peers: peerRows,
+      micState,
+      turn: TURN_CONFIGURED,
+      secure: window.isSecureContext,
+    };
+  }, [micState]);
+
+  const getMicStream = useCallback(() => streamRef.current, []);
+
   return {
     selfId,
+    getDiagnostics,
+    getMicStream,
     status,
     peers,
     messages,

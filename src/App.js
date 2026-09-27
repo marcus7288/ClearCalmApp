@@ -15,7 +15,16 @@ import {
   VolumeX,
   X,
 } from "lucide-react";
-import useComm from "./useComm";
+import useComm, {
+  chirp,
+  createLevelMeter,
+  TURN_CONFIGURED,
+  unlockAudio,
+} from "./useComm";
+
+// Netlify sets COMMIT_REF during the build (see netlify.toml), so the app can
+// show exactly which version is deployed.
+const BUILD = `v2 · ${(process.env.REACT_APP_COMMIT_REF || "dev").slice(0, 7)}`;
 
 const CHANNELS = [
   { id: 1, name: "Channel 1" },
@@ -74,7 +83,7 @@ const JoinScreen = ({ onJoin }) => {
   const [name, setName] = useState(prefs.name || "");
   const [team, setTeam] = useState(invite.team || prefs.team || "");
   const [passcode, setPasscode] = useState(
-    invite.passcode || prefs.passcode || ""
+    invite.passcode || prefs.passcode || "",
   );
   const teamCode = normalizeTeam(team);
   const canJoin = name.trim() && teamCode.length >= 3;
@@ -156,6 +165,134 @@ const JoinScreen = ({ onJoin }) => {
         Voice and messages travel directly between devices over encrypted
         connections. Your browser will ask for microphone access.
       </p>
+      <p className="text-xs text-slate-600 mt-2 text-center">{BUILD}</p>
+    </div>
+  );
+};
+
+const stateColor = (state) =>
+  ["connected", "playing"].includes(state)
+    ? "text-green-400"
+    : ["connecting", "new", "checking", "muted (other channel)"].includes(state)
+      ? "text-yellow-400"
+      : "text-red-400";
+
+const AudioCheck = ({ comm }) => {
+  const [level, setLevel] = useState(0);
+  const [testing, setTesting] = useState(false);
+
+  useEffect(() => {
+    if (!testing) return undefined;
+    const stream = comm.getMicStream();
+    if (!stream) return undefined;
+    const meter = createLevelMeter(stream);
+    let frame;
+    const tick = () => {
+      setLevel(meter.read());
+      frame = requestAnimationFrame(tick);
+    };
+    tick();
+    return () => {
+      cancelAnimationFrame(frame);
+      meter.stop();
+      setLevel(0);
+    };
+  }, [testing, comm]);
+
+  return (
+    <div>
+      <p className="text-sm text-slate-300 mb-2">Audio check</p>
+      <div className="flex gap-2">
+        <button
+          onClick={() => {
+            unlockAudio();
+            chirp(660, 0.6, 0.3);
+          }}
+          className="flex-1 rounded-lg py-2 bg-slate-700 hover:bg-slate-600 text-sm"
+        >
+          Test speaker (beep)
+        </button>
+        <button
+          onClick={() => setTesting((t) => !t)}
+          disabled={comm.micState !== "ready"}
+          className="flex-1 rounded-lg py-2 bg-slate-700 hover:bg-slate-600 text-sm disabled:text-slate-500"
+        >
+          {testing ? "Stop mic test" : "Test microphone"}
+        </button>
+      </div>
+      {testing && (
+        <div className="mt-2">
+          <div className="h-3 rounded bg-slate-900 overflow-hidden">
+            <div
+              className="h-full bg-green-500 transition-[width] duration-75"
+              style={{ width: `${Math.round(level * 100)}%` }}
+            />
+          </div>
+          <p className="text-xs text-slate-500 mt-1">
+            Speak - the bar should move. This only tests your mic; nothing is
+            sent to the team.
+          </p>
+        </div>
+      )}
+      {comm.micState === "denied" && (
+        <p className="text-xs text-red-400 mt-2">
+          Microphone blocked. Allow it for this site in your browser settings,
+          then leave and rejoin the team.
+        </p>
+      )}
+    </div>
+  );
+};
+
+const Diagnostics = ({ comm }) => {
+  const [diag, setDiag] = useState(comm.getDiagnostics);
+
+  useEffect(() => {
+    const id = setInterval(() => setDiag(comm.getDiagnostics()), 1000);
+    return () => clearInterval(id);
+  }, [comm]);
+
+  const relaysUp = diag.relays.filter((r) => r.state === "connected").length;
+
+  return (
+    <div>
+      <p className="text-sm text-slate-300 mb-2">Connection</p>
+      <div className="rounded-lg bg-slate-900 p-3 text-xs space-y-2">
+        <div>
+          <span className={relaysUp ? "text-green-400" : "text-red-400"}>
+            Relays: {relaysUp} of {diag.relays.length} connected
+          </span>
+          {!relaysUp && (
+            <p className="text-slate-400">
+              Can't reach any relay - this network may block them. Try another
+              Wi-Fi network or cellular data.
+            </p>
+          )}
+        </div>
+        <div>
+          <span className="text-slate-300">
+            Teammates connected: {diag.peers.length}
+          </span>
+          {diag.peers.map((p) => (
+            <div key={p.peerId} className="flex justify-between gap-2">
+              <span className="truncate">{p.name}</span>
+              <span className={stateColor(p.connection)}>{p.connection}</span>
+              <span className={stateColor(p.audio)}>{p.audio}</span>
+            </div>
+          ))}
+          {!diag.peers.length && relaysUp > 0 && (
+            <p className="text-slate-400">
+              Waiting for teammates. Check they use the same team code and
+              passcode.
+            </p>
+          )}
+        </div>
+        <div className="text-slate-400">
+          Mic: {diag.micState} · TURN relay:{" "}
+          {TURN_CONFIGURED ? "configured" : "not configured"} · HTTPS:{" "}
+          {diag.secure ? "yes" : "no (mic will not work)"}
+        </div>
+      </div>
     </div>
   );
 };
@@ -177,7 +314,7 @@ const SettingsPanel = ({ session, comm, onRename, onLeave, onClose }) => {
 
   return (
     <div className="fixed inset-0 bg-black/60 flex items-end sm:items-center justify-center z-10">
-      <div className="bg-slate-800 w-full max-w-md rounded-t-2xl sm:rounded-2xl p-5 space-y-5">
+      <div className="bg-slate-800 w-full max-w-md max-h-[90vh] overflow-y-auto rounded-t-2xl sm:rounded-2xl p-5 space-y-5">
         <div className="flex items-center justify-between">
           <h2 className="font-semibold text-lg">Settings</h2>
           <button onClick={onClose} aria-label="Close settings">
@@ -239,6 +376,11 @@ const SettingsPanel = ({ session, comm, onRename, onLeave, onClose }) => {
             <LogOut className="w-4 h-4" /> Leave team
           </button>
         </div>
+
+        <AudioCheck comm={comm} />
+        <Diagnostics comm={comm} />
+
+        <p className="text-xs text-slate-500 text-center">Clear Calm {BUILD}</p>
       </div>
     </div>
   );
@@ -288,7 +430,7 @@ const ClearCalmCommApp = () => {
     (m) =>
       m.type === "system" ||
       m.channel === selectedChannel ||
-      m.channel === EMERGENCY_ID
+      m.channel === EMERGENCY_ID,
   );
 
   useEffect(() => {
@@ -323,6 +465,7 @@ const ClearCalmCommApp = () => {
   }, [canTalk, startTalking, stopTalking]);
 
   const join = ({ name, team, passcode }) => {
+    unlockAudio();
     savePrefs({ name, team, passcode });
     setSession({ name, team, passcode });
     comm.connect({ name, team, passcode, channel: selectedChannel });
@@ -353,6 +496,17 @@ const ClearCalmCommApp = () => {
     comm.sendText(draft);
     setDraft("");
   };
+
+  // Any tap lets the browser start incoming audio (required on iPhones).
+  useEffect(() => {
+    if (!session) return undefined;
+    window.addEventListener("pointerdown", unlockAudio, true);
+    window.addEventListener("keydown", unlockAudio, true);
+    return () => {
+      window.removeEventListener("pointerdown", unlockAudio, true);
+      window.removeEventListener("keydown", unlockAudio, true);
+    };
+  }, [session]);
 
   const pttDown = (e) => {
     if (!canTalk) return;
@@ -414,21 +568,21 @@ const ClearCalmCommApp = () => {
               transmitting
                 ? "bg-red-600"
                 : talkers.length
-                ? "bg-amber-600"
-                : isConnected
-                ? "bg-green-600"
-                : "bg-slate-600"
+                  ? "bg-amber-600"
+                  : isConnected
+                    ? "bg-green-600"
+                    : "bg-slate-600"
             }`}
           >
             {transmitting
               ? "TRANSMITTING"
               : talkers.length
-              ? `${talkers.map((t) => t.name).join(", ")} TALKING`
-              : isConnected
-              ? peerList.length
-                ? "READY"
-                : "WAITING FOR TEAM"
-              : "OFFLINE"}
+                ? `${talkers.map((t) => t.name).join(", ")} TALKING`
+                : isConnected
+                  ? peerList.length
+                    ? "READY"
+                    : "WAITING FOR TEAM"
+                  : "OFFLINE"}
           </div>
         </div>
       </div>
@@ -495,12 +649,12 @@ const ClearCalmCommApp = () => {
                 message.type === "system"
                   ? "bg-slate-800 border-l-4 border-blue-500"
                   : emergency
-                  ? `bg-red-900/60 border border-red-500 ${
-                      mine ? "ml-8" : "mr-8"
-                    }`
-                  : mine
-                  ? "bg-blue-600 ml-8"
-                  : "bg-slate-700 mr-8"
+                    ? `bg-red-900/60 border border-red-500 ${
+                        mine ? "ml-8" : "mr-8"
+                      }`
+                    : mine
+                      ? "bg-blue-600 ml-8"
+                      : "bg-slate-700 mr-8"
               }`}
             >
               <div className="flex justify-between items-start mb-1 gap-2">
@@ -511,8 +665,8 @@ const ClearCalmCommApp = () => {
                   {message.type === "system"
                     ? "System"
                     : mine
-                    ? "You"
-                    : message.name}
+                      ? "You"
+                      : message.name}
                 </span>
                 <span className="text-xs text-slate-400">
                   {formatTime(message.ts)}
@@ -594,8 +748,8 @@ const ClearCalmCommApp = () => {
                 transmitting
                   ? "bg-red-500 scale-110 shadow-lg shadow-red-500/50"
                   : canTalk
-                  ? "bg-blue-600 hover:bg-blue-700"
-                  : "bg-slate-600 cursor-not-allowed"
+                    ? "bg-blue-600 hover:bg-blue-700"
+                    : "bg-slate-600 cursor-not-allowed"
               }`}
             >
               {micState === "denied" ? (
@@ -608,10 +762,10 @@ const ClearCalmCommApp = () => {
               {micState === "denied"
                 ? "Mic blocked"
                 : !canTalk
-                ? "Starting mic..."
-                : transmitting
-                ? "Release to stop"
-                : "Hold to talk (or Space)"}
+                  ? "Starting mic..."
+                  : transmitting
+                    ? "Release to stop"
+                    : "Hold to talk (or Space)"}
             </span>
           </div>
 
