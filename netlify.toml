@@ -1,6 +1,7 @@
 [build]
   command = "REACT_APP_COMMIT_REF=$COMMIT_REF npm run build"
   publish = "build"
+  functions = "netlify/functions"
 
 [build.environment]
   NODE_VERSION = "20"

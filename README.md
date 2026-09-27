@@ -37,7 +37,7 @@ server or database to run, so the app deploys as a static Netlify site.
   about 10-15 people on one team code. For larger groups, split them across
   several team codes.
 - Some strict networks (certain cellular carriers, corporate firewalls) block
-  direct connections. If a device can't connect, add a TURN server (see below).
+  direct connections. If a device can't connect, set up the TURN relay (see below).
 - Browsers only allow microphone access over HTTPS. Netlify provides HTTPS
   automatically.
 
@@ -61,20 +61,37 @@ The build number at the bottom of the join screen and in Settings (for example
 `v2 · a1b2c3d`) matches the Git commit Netlify deployed. If you don't see it,
 Netlify is still serving the old version.
 
-### Optional: TURN relay for cellular and strict networks
+### TURN relay (needed when some phones can't reach each other)
 
-1. Create a free TURN account (for example Metered.ca "Open Relay" or
-   Cloudflare Realtime TURN) and copy its URLs, username and credential.
+Each phone links directly to every other phone. Some network pairs can't
+open that link, for example two phones on cellular data, or two phones on the
+same Wi-Fi whose router doesn't let them reach each other. The app then shows
+**"Name · no link"**. A TURN relay carries the audio for those pairs; pairs
+that can connect directly keep doing so.
+
+**Recommended: Cloudflare (free tier, 1,000 GB/month)**
+
+1. Sign in at dash.cloudflare.com (a free account is fine) and go to
+   **Realtime -> TURN Server -> Create**. Copy the **Turn Token ID** and the
+   **API Token** it shows.
 2. In Netlify, open **Site configuration -> Environment variables** and add:
-   - `REACT_APP_TURN_URLS`, for example
-     `turn:global.relay.metered.ca:80,turns:global.relay.metered.ca:443?transport=tcp`
-   - `REACT_APP_TURN_USERNAME`
-   - `REACT_APP_TURN_CREDENTIAL`
-3. Choose **Deploys -> Trigger deploy**. Settings -> Connection then shows
-   "TURN relay: configured".
+   - `CLOUDFLARE_TURN_KEY_ID` = the Turn Token ID
+   - `CLOUDFLARE_TURN_API_TOKEN` = the API Token
+3. Choose **Deploys -> Trigger deploy -> Deploy site**.
+4. Open the app, then go to **Settings -> Connection**. It should say
+   **"TURN relay: on (Cloudflare)"**. Have everyone tap **Reconnect** (or
+   reload the page).
 
-These values end up inside the page and anyone can read them, so use
-credentials from a TURN account meant for public web apps.
+These secrets stay on Netlify. The small function in
+`netlify/functions/turn.mjs` gives each phone short-lived (12-hour)
+credentials, and only to pages served from your own site.
+
+**Alternative: Metered.ca.** Set `METERED_DOMAIN` (for example
+`yourapp.metered.live`) and `METERED_API_KEY` instead.
+
+**Alternative: fixed credentials.** Set `REACT_APP_TURN_URLS`,
+`REACT_APP_TURN_USERNAME` and `REACT_APP_TURN_CREDENTIAL`. These are built
+into the page where anyone can read them, so the function above is safer.
 
 ## Troubleshooting (Settings -> Connection)
 
@@ -83,6 +100,7 @@ credentials from a TURN account meant for public web apps.
 | Relays: 0 connected | This network blocks the introduction servers. Try other Wi-Fi or cellular data. |
 | Relays OK, Teammates connected: 0 | Team code or passcode doesn't match, or the other device isn't open. |
 | Teammate shows `failed` / `connecting` | The networks can't connect directly. Add a TURN relay (above). |
+| "Name · no link" in the roster | Others are connected to that person, but you aren't. Add a TURN relay (above). |
 | Teammate `connected` but audio `blocked` | Tap anywhere on the screen, which lets the phone start audio. |
 | Audio `muted (other channel)` | You're on different channels. Switch to the same one. |
 | No beep from "Test speaker" | Phone is on silent/vibrate (iPhone side switch) or volume is down. |

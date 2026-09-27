@@ -15,12 +15,7 @@ import {
   VolumeX,
   X,
 } from "lucide-react";
-import useComm, {
-  chirp,
-  createLevelMeter,
-  TURN_CONFIGURED,
-  unlockAudio,
-} from "./useComm";
+import useComm, { chirp, createLevelMeter, unlockAudio } from "./useComm";
 
 // Netlify sets COMMIT_REF during the build (see netlify.toml), so the app can
 // show exactly which version is deployed.
@@ -324,7 +319,7 @@ const Diagnostics = ({ comm }) => {
         </div>
         <div className="text-slate-400">
           Mic: {diag.micState} · TURN relay:{" "}
-          {TURN_CONFIGURED ? "configured" : "not configured"} · HTTPS:{" "}
+          {diag.turn ? `on (${diag.turn})` : "not set up"} · HTTPS:{" "}
           {diag.secure ? "yes" : "no (mic will not work)"} · Screen awake:{" "}
           {diag.wakeLock === "unsupported" ? "not supported" : diag.wakeLock}
         </div>
@@ -491,6 +486,18 @@ const ClearCalmCommApp = () => {
       (p.to === comm.selfId || (!p.to && p.channel === selectedChannel)),
   );
   const directPeer = directTo ? peers[directTo] : null;
+
+  // Teammates that others are connected to but we aren't: a network between
+  // us is blocking a direct link (a TURN relay fixes this).
+  const unlinked = [];
+  const seenIds = new Set([comm.selfId, ...Object.keys(peers)]);
+  peerList.forEach((p) =>
+    Object.entries(p.links || {}).forEach(([id, name]) => {
+      if (seenIds.has(id)) return;
+      seenIds.add(id);
+      unlinked.push({ id, name });
+    }),
+  );
 
   // Drop the direct target if that person leaves.
   useEffect(() => {
@@ -729,7 +736,23 @@ const ClearCalmCommApp = () => {
               </button>
             );
           })}
+          {unlinked.map((u) => (
+            <span
+              key={u.id}
+              title={`You're not connected to ${u.name}`}
+              className="text-xs px-2 py-1 rounded-full border border-dashed border-red-400 text-red-300"
+            >
+              {u.name} · no link
+            </span>
+          ))}
         </div>
+        {unlinked.length > 0 && (
+          <p className="text-xs text-red-300 mt-2">
+            No direct link to {unlinked.map((u) => u.name).join(", ")} - a
+            network between you is blocking it. Setting up a TURN relay fixes
+            this (see Settings &gt; Connection).
+          </p>
+        )}
         {peerList.length > 0 && !directPeer && (
           <p className="text-xs text-slate-500 mt-2">
             Tap a name to talk to that person privately.

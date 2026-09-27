@@ -32,8 +32,7 @@ const RELAY_URLS = envList(process.env.REACT_APP_NOSTR_RELAYS).length
 // Optional TURN relay for networks that block direct connections (common on
 // cellular data). Set these as environment variables in Netlify.
 const TURN_URLS = envList(process.env.REACT_APP_TURN_URLS);
-export const TURN_CONFIGURED = TURN_URLS.length > 0;
-const TURN_CONFIG = TURN_CONFIGURED
+const TURN_CONFIG = TURN_URLS.length
   ? [
       {
         urls: TURN_URLS,
@@ -46,12 +45,52 @@ const TURN_CONFIG = TURN_CONFIGURED
 const now = () => Date.now();
 
 // `to` is the peer ID someone is talking to directly, or null for the channel.
-const presenceOf = ({ name, channel, talking, to }) => ({
+// `links` maps the peer IDs we're connected to onto their names, so teammates
+// can tell when someone is on the team but has no direct link to them.
+const presenceOf = ({ name, channel, talking, to }, links = {}) => ({
   name,
   channel,
   talking,
   to: to || null,
+  links,
 });
+
+const linksOf = (peers) =>
+  Object.fromEntries(Object.entries(peers).map(([id, p]) => [id, p.name]));
+
+const cleanLinks = (links) => {
+  if (!links || typeof links !== "object") return {};
+  return Object.fromEntries(
+    Object.entries(links)
+      .filter(([id, n]) => typeof n === "string" && id.length <= 64)
+      .slice(0, 50)
+      .map(([id, n]) => [id, n.slice(0, 40)]),
+  );
+};
+
+// Ask our Netlify Function for short-lived TURN relay credentials (see
+// netlify/functions/turn.mjs). Falls back to direct-only if it isn't set up
+// or can't be reached, e.g. when running locally.
+const fetchTurnServers = async () => {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 4000);
+  try {
+    const res = await fetch("/.netlify/functions/turn", {
+      method: "POST",
+      signal: ctrl.signal,
+    });
+    if (!res.ok) return { provider: null, iceServers: [] };
+    const data = await res.json();
+    const iceServers = Array.isArray(data.iceServers)
+      ? data.iceServers.filter((s) => s && s.urls)
+      : [];
+    return { provider: iceServers.length ? data.provider : null, iceServers };
+  } catch {
+    return { provider: null, iceServers: [] };
+  } finally {
+    clearTimeout(timer);
+  }
+};
 
 const makeId = () =>
   `${selfId}-${now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
@@ -295,9 +334,21 @@ export default function useComm() {
   useEffect(applyAudio, [peers, applyAudio]);
 
   const broadcastPresence = useCallback(() => {
-    actionsRef.current?.presence.send(presenceOf(selfRef.current));
+    actionsRef.current?.presence.send(
+      presenceOf(selfRef.current, linksOf(peersRef.current)),
+    );
   }, []);
 
+  // Tell everyone whenever our set of connections changes.
+  const linkKey = Object.entries(peers)
+    .map(([id, p]) => `${id}:${p.name}`)
+    .sort()
+    .join("|");
+  useEffect(() => {
+    if (linkKey) broadcastPresence();
+  }, [linkKey, broadcastPresence]);
+
+  const turnSourceRef = useRef(null); // which TURN relay is in use, if any
   const leavingRef = useRef(null); // pending room.leave(), awaited on rejoin
   const lastJoinRef = useRef(null); // { team, passcode } for reconnect()
   const failuresRef = useRef({ count: 0, last: "" });
@@ -349,12 +400,20 @@ export default function useComm() {
       // while it is still closing would hand back the closing instance.
       if (leavingRef.current) await leavingRef.current;
       if (roomRef.current) return;
+      const turn = await fetchTurnServers();
+      if (roomRef.current) return;
 
       const config = {
         appId: APP_ID,
         relayConfig: { urls: RELAY_URLS },
       };
-      if (TURN_CONFIG) config.turnConfig = TURN_CONFIG;
+      const turnServers = [...(TURN_CONFIG || []), ...turn.iceServers];
+      if (turnServers.length) config.turnConfig = turnServers;
+      turnSourceRef.current = turn.provider
+        ? turn.provider
+        : TURN_CONFIG
+          ? "build settings"
+          : null;
       if (passcode) config.password = passcode;
 
       const room = joinRoom(config, team, {
@@ -398,7 +457,12 @@ export default function useComm() {
       };
 
       room.onPeerJoin = (peerId) => {
-        presenceAction.send(presenceOf(selfRef.current), { target: peerId });
+        presenceAction.send(
+          presenceOf(selfRef.current, linksOf(peersRef.current)),
+          {
+            target: peerId,
+          },
+        );
         const history = messagesRef.current.filter((m) => m.type !== "system");
         if (history.length) historyAction.send(history, { target: peerId });
         // A join is always a fresh connection - even for a peer ID we've
@@ -433,6 +497,7 @@ export default function useComm() {
           channel: Number(data.channel) || 1,
           talking: !!data.talking,
           to: typeof data.to === "string" ? data.to : null,
+          links: cleanLinks(data.links),
         };
         const previous = peersRef.current[peerId];
         if (!previous) addSystem(`${info.name} joined`);
@@ -640,7 +705,7 @@ export default function useComm() {
       failures: failuresRef.current,
       wakeLock,
       micState,
-      turn: TURN_CONFIGURED,
+      turn: turnSourceRef.current,
       secure: window.isSecureContext,
     };
   }, [micState, wakeLock]);
