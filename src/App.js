@@ -15,11 +15,23 @@ import {
   VolumeX,
   X,
 } from "lucide-react";
-import useComm, { chirp, createLevelMeter, unlockAudio } from "./useComm";
+import useComm, {
+  chirp,
+  createLevelMeter,
+  isAudioBlocked,
+  unlockAudio,
+} from "./useComm";
 
 // Netlify sets COMMIT_REF during the build (see netlify.toml), so the app can
 // show exactly which version is deployed.
 const BUILD = `v2 · ${(process.env.REACT_APP_COMMIT_REF || "dev").slice(0, 7)}`;
+
+// Only mention the Space-bar shortcut on devices with a mouse/trackpad.
+const hasKeyboard =
+  typeof window !== "undefined" &&
+  window.matchMedia?.("(pointer: fine)").matches;
+
+const AUTOJOIN_KEY = "clearcalm:autojoin";
 
 const CHANNELS = [
   { id: 1, name: "Channel 1" },
@@ -239,7 +251,7 @@ const AudioCheck = ({ comm }) => {
   );
 };
 
-const Diagnostics = ({ comm }) => {
+const Diagnostics = ({ comm, onReconnect }) => {
   const [diag, setDiag] = useState(comm.getDiagnostics);
   const [reconnecting, setReconnecting] = useState(false);
   const [latency, setLatency] = useState({});
@@ -339,8 +351,7 @@ const Diagnostics = ({ comm }) => {
       <button
         onClick={async () => {
           setReconnecting(true);
-          await comm.reconnect();
-          setReconnecting(false);
+          onReconnect();
         }}
         disabled={reconnecting}
         className="mt-2 w-full rounded-lg py-2 bg-slate-700 hover:bg-slate-600 text-sm disabled:text-slate-500"
@@ -351,7 +362,16 @@ const Diagnostics = ({ comm }) => {
   );
 };
 
-const SettingsPanel = ({ session, comm, onRename, onLeave, onClose }) => {
+const SettingsPanel = ({
+  session,
+  comm,
+  volume,
+  onVolume,
+  onRename,
+  onLeave,
+  onReconnect,
+  onClose,
+}) => {
   const [name, setName] = useState(session.name);
   const [copied, setCopied] = useState(false);
   const link = inviteLink(session.team, session.passcode);
@@ -431,8 +451,25 @@ const SettingsPanel = ({ session, comm, onRename, onLeave, onClose }) => {
           </button>
         </div>
 
+        <div>
+          <p className="text-sm text-slate-300 mb-2">Volume: {volume}%</p>
+          <div className="flex items-center space-x-3">
+            <VolumeX className="w-5 h-5 text-slate-400" />
+            <input
+              type="range"
+              min="0"
+              max="100"
+              value={volume}
+              onChange={(e) => onVolume(Number(e.target.value))}
+              aria-label="Volume"
+              className="flex-1 h-2 bg-slate-600 rounded-lg appearance-none cursor-pointer"
+            />
+            <Volume2 className="w-5 h-5 text-slate-400" />
+          </div>
+        </div>
+
         <AudioCheck comm={comm} />
-        <Diagnostics comm={comm} />
+        <Diagnostics comm={comm} onReconnect={onReconnect} />
 
         <p className="text-xs text-slate-500 text-center">Clear Calm {BUILD}</p>
       </div>
@@ -544,18 +581,60 @@ const ClearCalmCommApp = () => {
     };
   }, [canTalk, startTalking, stopTalking, directTo]);
 
-  const join = ({ name, team, passcode }) => {
+  const join = ({ name, team, passcode, channel = selectedChannel }) => {
     unlockAudio();
     savePrefs({ name, team, passcode });
+    setSelectedChannel(channel);
     setSession({ name, team, passcode });
-    comm.connect({ name, team, passcode, channel: selectedChannel });
+    comm.connect({ name, team, passcode, channel });
+  };
+
+  // Leaving and reconnecting reload the page. That gives this device a fresh
+  // identity and fresh connections, so teammates can't hand back a stale
+  // connection from before (which left a reconnected person without audio).
+  const reloadSoon = () => {
+    comm.disconnect();
+    setTimeout(() => window.location.reload(), 300);
   };
 
   const leave = () => {
-    comm.disconnect();
-    setSession(null);
     setShowSettings(false);
+    reloadSoon();
   };
+
+  const reconnect = () => {
+    try {
+      sessionStorage.setItem(
+        AUTOJOIN_KEY,
+        JSON.stringify({ ...session, channel: selectedChannel }),
+      );
+    } catch {
+      // ignore - they'll just see the join screen
+    }
+    reloadSoon();
+  };
+
+  // After a Reconnect reload, rejoin automatically.
+  useEffect(() => {
+    let auto = null;
+    try {
+      auto = JSON.parse(sessionStorage.getItem(AUTOJOIN_KEY));
+      sessionStorage.removeItem(AUTOJOIN_KEY);
+    } catch {
+      // ignore
+    }
+    if (auto?.name && auto?.team) join(auto);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Browsers only allow sound after a tap. Show a clear prompt until then
+  // (mostly needed on iPhones, and after an automatic rejoin).
+  const [soundBlocked, setSoundBlocked] = useState(false);
+  useEffect(() => {
+    if (!session) return undefined;
+    const id = setInterval(() => setSoundBlocked(isAudioBlocked()), 1000);
+    return () => clearInterval(id);
+  }, [session]);
 
   const rename = (name) => {
     savePrefs({ ...loadPrefs(), name });
@@ -601,354 +680,362 @@ const ClearCalmCommApp = () => {
   const current = CHANNELS.find((c) => c.id === selectedChannel);
 
   return (
-    <div className="max-w-md mx-auto bg-slate-900 text-white h-screen h-[100dvh] flex flex-col">
-      {/* Header */}
-      <div className="bg-slate-800 p-4 flex items-center justify-between border-b border-slate-700">
-        <div className="flex items-center space-x-3 min-w-0">
-          <div
-            className={`w-3 h-3 shrink-0 rounded-full ${
-              isConnected
-                ? peerList.length
-                  ? "bg-green-500"
-                  : "bg-yellow-500"
-                : "bg-red-500"
-            }`}
-          ></div>
-          <div className="min-w-0">
-            <h1 className="font-semibold text-lg">Clear Calm</h1>
-            <p className="text-xs text-slate-400 truncate">
-              {isConnected
-                ? `${session.team} · ${current.name} · ${session.name}`
-                : "Connecting..."}
-            </p>
-          </div>
-        </div>
-        <button
-          onClick={() => setShowSettings(true)}
-          aria-label="Settings"
-          className="p-1"
-        >
-          <Settings className="w-6 h-6 text-slate-400" />
-        </button>
-      </div>
-
-      {/* Status Bar */}
-      <div className="bg-slate-800 px-4 py-2 border-b border-slate-700">
-        <div className="flex items-center justify-between text-sm gap-2">
-          <div className="flex items-center space-x-4">
-            <span className="text-slate-300">
-              Vol: {isMuted ? "muted" : `${volume}%`}
-            </span>
-            <div className="flex items-center space-x-1" title="Team online">
-              <Users className="w-4 h-4" />
-              <span className="text-slate-300">{peerList.length + 1}</span>
-            </div>
-          </div>
-          <div
-            className={`px-2 py-1 rounded text-xs font-medium truncate ${
-              transmitting
-                ? directPeer
-                  ? "bg-purple-600"
-                  : "bg-red-600"
-                : talkers.length
-                  ? talkers.some((t) => t.to === comm.selfId)
-                    ? "bg-purple-600"
-                    : "bg-amber-600"
-                  : isConnected
-                    ? "bg-green-600"
-                    : "bg-slate-600"
-            }`}
-          >
-            {transmitting
-              ? directPeer
-                ? `TALKING TO ${directPeer.name.toUpperCase()}`
-                : "TRANSMITTING"
-              : talkers.length
-                ? `${talkers
-                    .map((t) =>
-                      t.to === comm.selfId ? `${t.name} (to you)` : t.name,
-                    )
-                    .join(", ")} TALKING`
-                : isConnected
-                  ? peerList.length
-                    ? "READY"
-                    : "WAITING FOR TEAM"
-                  : "OFFLINE"}
-          </div>
-        </div>
-      </div>
-
-      {/* Channel Selection */}
-      <div className="p-4 border-b border-slate-700">
-        <div className="grid grid-cols-4 gap-2">
-          {CHANNELS.map((channel) => (
-            <button
-              key={channel.id}
-              onClick={() => switchChannel(channel.id)}
-              className={`p-2 rounded-lg border transition-all ${
-                selectedChannel === channel.id
-                  ? channel.emergency
-                    ? "border-red-500 bg-red-500/20 text-red-300"
-                    : "border-blue-500 bg-blue-500/20 text-blue-300"
-                  : "border-slate-600 bg-slate-800 hover:bg-slate-700"
-              }`}
-            >
-              <div className="text-xs font-medium truncate">
-                {channel.emergency ? "Emergency" : `Ch ${channel.id}`}
-              </div>
-              <div className="text-xs text-slate-400">
-                {channelCounts[channel.id]} on
-              </div>
-            </button>
-          ))}
-        </div>
-        <div className="flex flex-wrap gap-1 mt-3">
-          <span className="text-xs px-2 py-1 rounded-full bg-blue-600/30 text-blue-200">
-            {session.name} (you)
-          </span>
-          {[...onChannel, ...elsewhere].map((p) => {
-            const hearing =
-              p.talking &&
-              (p.to === comm.selfId ||
-                (!p.to && p.channel === selectedChannel));
-            return (
-              <button
-                key={p.id}
-                onClick={() => setDirectTo(directTo === p.id ? null : p.id)}
-                title={`Talk privately to ${p.name}`}
-                className={`text-xs px-2 py-1 rounded-full flex items-center gap-1 border ${
-                  directTo === p.id
-                    ? "border-purple-400 bg-purple-600 text-white"
-                    : hearing
-                      ? "border-transparent bg-amber-500 text-slate-900"
-                      : p.channel === selectedChannel
-                        ? "border-transparent bg-slate-700 text-slate-200"
-                        : "border-slate-700 bg-transparent text-slate-400"
-                }`}
-              >
-                {hearing && <Mic className="w-3 h-3" />}
-                {p.name}
-                {p.channel !== selectedChannel && (
-                  <span className="opacity-70">
-                    · {p.channel === EMERGENCY_ID ? "Emerg" : `Ch ${p.channel}`}
-                  </span>
-                )}
-              </button>
-            );
-          })}
-          {unlinked.map((u) => (
-            <span
-              key={u.id}
-              title={`You're not connected to ${u.name}`}
-              className="text-xs px-2 py-1 rounded-full border border-dashed border-red-400 text-red-300"
-            >
-              {u.name} · no link
-            </span>
-          ))}
-        </div>
-        {unlinked.length > 0 && (
-          <p className="text-xs text-red-300 mt-2">
-            No direct link to {unlinked.map((u) => u.name).join(", ")} - a
-            network between you is blocking it. Setting up a TURN relay fixes
-            this (see Settings &gt; Connection).
-          </p>
-        )}
-        {peerList.length > 0 && !directPeer && (
-          <p className="text-xs text-slate-500 mt-2">
-            Tap a name to talk to that person privately.
-          </p>
-        )}
-      </div>
-
-      {/* Message Feed */}
-      <div ref={feedRef} className="flex-1 p-4 space-y-3 overflow-y-auto">
-        {visibleMessages.length === 0 && (
-          <p className="text-sm text-slate-500 text-center mt-8">
-            No messages yet on {current.name}. Hold the button to talk, or type
-            below.
-          </p>
-        )}
-        {visibleMessages.map((message) => {
-          const mine = message.from === comm.selfId;
-          const emergency = message.channel === EMERGENCY_ID;
-          return (
+    <div className="fixed inset-0 bg-slate-900 text-white overflow-hidden">
+      <div className="max-w-md mx-auto h-full flex flex-col">
+        {/* Header */}
+        <div className="bg-slate-800 p-4 flex items-center justify-between border-b border-slate-700">
+          <div className="flex items-center space-x-3 min-w-0">
             <div
-              key={message.id}
-              className={`p-3 rounded-lg ${
-                message.type === "system"
-                  ? "bg-slate-800 border-l-4 border-blue-500"
-                  : emergency
-                    ? `bg-red-900/60 border border-red-500 ${
-                        mine ? "ml-8" : "mr-8"
-                      }`
-                    : mine
-                      ? "bg-blue-600 ml-8"
-                      : "bg-slate-700 mr-8"
+              className={`w-3 h-3 shrink-0 rounded-full ${
+                isConnected
+                  ? peerList.length
+                    ? "bg-green-500"
+                    : "bg-yellow-500"
+                  : "bg-red-500"
               }`}
-            >
-              <div className="flex justify-between items-start mb-1 gap-2">
-                <span className="text-sm font-medium text-slate-200 flex items-center gap-1">
-                  {emergency && message.type !== "system" && (
-                    <AlertTriangle className="w-4 h-4 text-red-300" />
-                  )}
-                  {message.type === "system"
-                    ? "System"
-                    : mine
-                      ? "You"
-                      : message.name}
-                </span>
-                <span className="text-xs text-slate-400">
-                  {formatTime(message.ts)}
-                </span>
-              </div>
-              <p className="text-sm text-slate-100 whitespace-pre-wrap break-words">
-                {message.text}
+            ></div>
+            <div className="min-w-0">
+              <h1 className="font-semibold text-lg">Clear Calm</h1>
+              <p className="text-xs text-slate-400 truncate">
+                {isConnected
+                  ? `${session.team} · ${current.name} · ${session.name}`
+                  : "Connecting..."}
               </p>
             </div>
-          );
-        })}
-      </div>
-
-      {/* Text compose */}
-      <form
-        onSubmit={sendDraft}
-        className="px-4 py-2 bg-slate-800 border-t border-slate-700 flex gap-2"
-      >
-        <input
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          maxLength={1000}
-          placeholder={`Message ${current.name}`}
-          disabled={!isConnected}
-          className="flex-1 rounded-lg bg-slate-900 border border-slate-600 px-3 py-2 text-sm focus:outline-none focus:border-blue-500"
-        />
-        <button
-          type="submit"
-          disabled={!isConnected || !draft.trim()}
-          aria-label="Send message"
-          className="px-3 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:bg-slate-700"
-        >
-          <Send className="w-5 h-5" />
-        </button>
-      </form>
-
-      {/* Direct (private) talk banner */}
-      {directPeer && (
-        <div className="px-4 py-2 bg-purple-900/60 border-t border-purple-500 flex items-center justify-between gap-2">
-          <span className="text-sm text-purple-100 truncate">
-            <b>Direct to {directPeer.name}</b> - only they will hear you
-          </span>
-          <button
-            onClick={() => setDirectTo(null)}
-            className="text-xs px-2 py-1 rounded bg-purple-700 hover:bg-purple-600 shrink-0"
-          >
-            Back to channel
-          </button>
-        </div>
-      )}
-
-      {/* Controls */}
-      <div className="p-4 bg-slate-800">
-        {/* Volume Control */}
-        <div className="flex items-center space-x-3 mb-4">
-          <VolumeX className="w-5 h-5 text-slate-400" />
-          <div className="flex-1">
-            <input
-              type="range"
-              min="0"
-              max="100"
-              value={volume}
-              onChange={(e) => setVolume(Number(e.target.value))}
-              aria-label="Volume"
-              className="w-full h-2 bg-slate-600 rounded-lg appearance-none cursor-pointer"
-            />
           </div>
-          <Volume2 className="w-5 h-5 text-slate-400" />
+          <button
+            onClick={() => setShowSettings(true)}
+            aria-label="Settings"
+            className="p-1"
+          >
+            <Settings className="w-6 h-6 text-slate-400" />
+          </button>
         </div>
 
-        {/* Main Controls */}
-        <div className="flex items-center justify-between">
-          {/* Leave */}
-          <button
-            onClick={leave}
-            aria-label="Disconnect"
-            className="p-3 rounded-full transition-all bg-red-600 hover:bg-red-700"
-          >
-            <PhoneOff className="w-6 h-6" />
-          </button>
-
-          {/* Push-to-Talk Button */}
-          <div className="flex flex-col items-center">
-            <button
-              onPointerDown={pttDown}
-              onPointerUp={stopTalking}
-              onPointerCancel={stopTalking}
-              onLostPointerCapture={stopTalking}
-              onContextMenu={(e) => e.preventDefault()}
-              disabled={!canTalk}
-              aria-label={
-                directPeer
-                  ? `Hold to talk to ${directPeer.name}`
-                  : "Hold to talk"
-              }
-              style={{ touchAction: "none", WebkitUserSelect: "none" }}
-              className={`w-20 h-20 rounded-full transition-all duration-150 select-none ${
+        {/* Status Bar */}
+        <div className="bg-slate-800 px-4 py-2 border-b border-slate-700">
+          <div className="flex items-center justify-between text-sm gap-2">
+            <div className="flex items-center space-x-4">
+              {isMuted && <span className="text-red-300">Speaker muted</span>}
+              <div className="flex items-center space-x-1" title="Team online">
+                <Users className="w-4 h-4" />
+                <span className="text-slate-300">{peerList.length + 1}</span>
+              </div>
+            </div>
+            <div
+              className={`px-2 py-1 rounded text-xs font-medium truncate ${
                 transmitting
                   ? directPeer
-                    ? "bg-purple-500 scale-110 shadow-lg shadow-purple-500/50"
-                    : "bg-red-500 scale-110 shadow-lg shadow-red-500/50"
-                  : canTalk
-                    ? directPeer
-                      ? "bg-purple-600 hover:bg-purple-700"
-                      : "bg-blue-600 hover:bg-blue-700"
-                    : "bg-slate-600 cursor-not-allowed"
+                    ? "bg-purple-600"
+                    : "bg-red-600"
+                  : talkers.length
+                    ? talkers.some((t) => t.to === comm.selfId)
+                      ? "bg-purple-600"
+                      : "bg-amber-600"
+                    : isConnected
+                      ? "bg-green-600"
+                      : "bg-slate-600"
               }`}
             >
-              {micState === "denied" ? (
-                <MicOff className="w-8 h-8 mx-auto" />
+              {transmitting
+                ? directPeer
+                  ? `TALKING TO ${directPeer.name.toUpperCase()}`
+                  : "TRANSMITTING"
+                : talkers.length
+                  ? `${talkers
+                      .map((t) =>
+                        t.to === comm.selfId ? `${t.name} (to you)` : t.name,
+                      )
+                      .join(", ")} TALKING`
+                  : isConnected
+                    ? peerList.length
+                      ? "READY"
+                      : "WAITING FOR TEAM"
+                    : "OFFLINE"}
+            </div>
+          </div>
+        </div>
+
+        {/* Direct (private) talk banner */}
+        {directPeer && (
+          <div className="px-4 py-2 bg-purple-900/60 border-b border-purple-500 flex items-center justify-between gap-2">
+            <span className="text-sm text-purple-100 truncate">
+              <b>Direct to {directPeer.name}</b> - only they will hear you
+            </span>
+            <button
+              onClick={() => setDirectTo(null)}
+              className="text-xs px-2 py-1 rounded bg-purple-700 hover:bg-purple-600 shrink-0"
+            >
+              Back to channel
+            </button>
+          </div>
+        )}
+
+        {soundBlocked && (
+          <button
+            onClick={() => {
+              unlockAudio();
+              chirp(660, 0.15, 0.2);
+              setSoundBlocked(isAudioBlocked());
+            }}
+            className="w-full px-4 py-2 bg-amber-500 text-slate-900 text-sm font-semibold"
+          >
+            Tap here to turn on sound
+          </button>
+        )}
+
+        {/* Talk controls - near the top so the button is easy to reach and
+          away from the phone's bottom-edge scroll and home gestures */}
+        <div className="px-4 py-3 bg-slate-800 border-b border-slate-700">
+          {/* Main Controls */}
+          <div className="flex items-center justify-between">
+            {/* Leave */}
+            <button
+              onClick={() => {
+                if (window.confirm("Leave the team?")) leave();
+              }}
+              aria-label="Disconnect"
+              className="p-3 rounded-full transition-all bg-red-600 hover:bg-red-700"
+            >
+              <PhoneOff className="w-6 h-6" />
+            </button>
+
+            {/* Push-to-Talk Button */}
+            <div className="flex flex-col items-center">
+              <button
+                onPointerDown={pttDown}
+                onPointerUp={stopTalking}
+                onPointerCancel={stopTalking}
+                onLostPointerCapture={stopTalking}
+                onContextMenu={(e) => e.preventDefault()}
+                disabled={!canTalk}
+                aria-label={
+                  directPeer
+                    ? `Hold to talk to ${directPeer.name}`
+                    : "Hold to talk"
+                }
+                style={{ touchAction: "none", WebkitUserSelect: "none" }}
+                className={`w-28 h-28 rounded-full transition-all duration-150 select-none ${
+                  transmitting
+                    ? directPeer
+                      ? "bg-purple-500 scale-110 shadow-lg shadow-purple-500/50"
+                      : "bg-red-500 scale-110 shadow-lg shadow-red-500/50"
+                    : canTalk
+                      ? directPeer
+                        ? "bg-purple-600 hover:bg-purple-700"
+                        : "bg-blue-600 hover:bg-blue-700"
+                      : "bg-slate-600 cursor-not-allowed"
+                }`}
+              >
+                {micState === "denied" ? (
+                  <MicOff className="w-12 h-12 mx-auto" />
+                ) : (
+                  <Mic className="w-12 h-12 mx-auto" />
+                )}
+              </button>
+              <span className="text-sm text-slate-300 mt-2">
+                {micState === "denied"
+                  ? "Mic blocked"
+                  : !canTalk
+                    ? "Starting mic..."
+                    : transmitting
+                      ? "Release to stop"
+                      : directPeer
+                        ? `Hold to talk to ${directPeer.name}`
+                        : hasKeyboard
+                          ? "Hold to talk (or Space)"
+                          : "Hold to talk"}
+              </span>
+            </div>
+
+            {/* Speaker Mute Toggle */}
+            <button
+              onClick={() => setIsMuted(!isMuted)}
+              aria-label={isMuted ? "Unmute speaker" : "Mute speaker"}
+              className={`p-3 rounded-full transition-all ${
+                isMuted ? "bg-red-600" : "bg-slate-600 hover:bg-slate-700"
+              }`}
+            >
+              {isMuted ? (
+                <VolumeX className="w-6 h-6" />
               ) : (
-                <Mic className="w-8 h-8 mx-auto" />
+                <Volume2 className="w-6 h-6" />
               )}
             </button>
-            <span className="text-xs text-slate-400 mt-2">
-              {micState === "denied"
-                ? "Mic blocked"
-                : !canTalk
-                  ? "Starting mic..."
-                  : transmitting
-                    ? "Release to stop"
-                    : directPeer
-                      ? `Hold to talk to ${directPeer.name}`
-                      : "Hold to talk (or Space)"}
-            </span>
           </div>
-
-          {/* Speaker Mute Toggle */}
-          <button
-            onClick={() => setIsMuted(!isMuted)}
-            aria-label={isMuted ? "Unmute speaker" : "Mute speaker"}
-            className={`p-3 rounded-full transition-all ${
-              isMuted ? "bg-red-600" : "bg-slate-600 hover:bg-slate-700"
-            }`}
-          >
-            {isMuted ? (
-              <VolumeX className="w-6 h-6" />
-            ) : (
-              <Volume2 className="w-6 h-6" />
-            )}
-          </button>
         </div>
-      </div>
 
-      {showSettings && (
-        <SettingsPanel
-          session={session}
-          comm={comm}
-          onRename={rename}
-          onLeave={leave}
-          onClose={() => setShowSettings(false)}
-        />
-      )}
+        {/* Channel Selection */}
+        <div className="px-4 py-3 border-b border-slate-700">
+          <div className="grid grid-cols-4 gap-2">
+            {CHANNELS.map((channel) => (
+              <button
+                key={channel.id}
+                onClick={() => switchChannel(channel.id)}
+                className={`px-1 py-2 rounded-lg border transition-all ${
+                  selectedChannel === channel.id
+                    ? channel.emergency
+                      ? "border-red-500 bg-red-500/20 text-red-300"
+                      : "border-blue-500 bg-blue-500/20 text-blue-300"
+                    : "border-slate-600 bg-slate-800 hover:bg-slate-700"
+                }`}
+              >
+                <div className="text-xs font-medium whitespace-nowrap">
+                  {channel.emergency ? "Emergency" : `Ch ${channel.id}`}
+                </div>
+                <div className="text-xs text-slate-400">
+                  {channelCounts[channel.id]} on
+                </div>
+              </button>
+            ))}
+          </div>
+          <div className="flex flex-wrap gap-1 mt-3">
+            <span className="text-xs px-2 py-1 rounded-full bg-blue-600/30 text-blue-200">
+              {session.name} (you)
+            </span>
+            {[...onChannel, ...elsewhere].map((p) => {
+              const hearing =
+                p.talking &&
+                (p.to === comm.selfId ||
+                  (!p.to && p.channel === selectedChannel));
+              return (
+                <button
+                  key={p.id}
+                  onClick={() => setDirectTo(directTo === p.id ? null : p.id)}
+                  title={`Talk privately to ${p.name}`}
+                  className={`text-xs px-2 py-1 rounded-full flex items-center gap-1 border ${
+                    directTo === p.id
+                      ? "border-purple-400 bg-purple-600 text-white"
+                      : hearing
+                        ? "border-transparent bg-amber-500 text-slate-900"
+                        : p.channel === selectedChannel
+                          ? "border-transparent bg-slate-700 text-slate-200"
+                          : "border-slate-700 bg-transparent text-slate-400"
+                  }`}
+                >
+                  {hearing && <Mic className="w-3 h-3" />}
+                  {p.name}
+                  {p.channel !== selectedChannel && (
+                    <span className="opacity-70">
+                      ·{" "}
+                      {p.channel === EMERGENCY_ID ? "Emerg" : `Ch ${p.channel}`}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+            {unlinked.map((u) => (
+              <span
+                key={u.id}
+                title={`You're not connected to ${u.name}`}
+                className="text-xs px-2 py-1 rounded-full border border-dashed border-red-400 text-red-300"
+              >
+                {u.name} · no link
+              </span>
+            ))}
+          </div>
+          {unlinked.length > 0 && (
+            <p className="text-xs text-red-300 mt-2">
+              No direct link to {unlinked.map((u) => u.name).join(", ")} - a
+              network between you is blocking it. Setting up a TURN relay fixes
+              this (see Settings &gt; Connection).
+            </p>
+          )}
+          {peerList.length > 0 && !directPeer && (
+            <p className="text-xs text-slate-500 mt-2">
+              Tap a name to talk to that person privately.
+            </p>
+          )}
+        </div>
+
+        {/* Message Feed */}
+        <div
+          ref={feedRef}
+          className="flex-1 min-h-0 p-4 space-y-3 overflow-y-auto overscroll-contain"
+        >
+          {visibleMessages.length === 0 && (
+            <p className="text-sm text-slate-500 text-center mt-8">
+              No messages yet on {current.name}. Hold the big button to talk, or
+              type below.
+            </p>
+          )}
+          {visibleMessages.map((message) => {
+            const mine = message.from === comm.selfId;
+            const emergency = message.channel === EMERGENCY_ID;
+            return (
+              <div
+                key={message.id}
+                className={`p-3 rounded-lg ${
+                  message.type === "system"
+                    ? "bg-slate-800 border-l-4 border-blue-500"
+                    : emergency
+                      ? `bg-red-900/60 border border-red-500 ${
+                          mine ? "ml-8" : "mr-8"
+                        }`
+                      : mine
+                        ? "bg-blue-600 ml-8"
+                        : "bg-slate-700 mr-8"
+                }`}
+              >
+                <div className="flex justify-between items-start mb-1 gap-2">
+                  <span className="text-sm font-medium text-slate-200 flex items-center gap-1">
+                    {emergency && message.type !== "system" && (
+                      <AlertTriangle className="w-4 h-4 text-red-300" />
+                    )}
+                    {message.type === "system"
+                      ? "System"
+                      : mine
+                        ? "You"
+                        : message.name}
+                  </span>
+                  <span className="text-xs text-slate-400">
+                    {formatTime(message.ts)}
+                  </span>
+                </div>
+                <p className="text-sm text-slate-100 whitespace-pre-wrap break-words">
+                  {message.text}
+                </p>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Text compose */}
+        <form
+          onSubmit={sendDraft}
+          className="px-4 pt-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] bg-slate-800 border-t border-slate-700 flex gap-2"
+        >
+          <input
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            maxLength={1000}
+            placeholder={`Message ${current.name}`}
+            disabled={!isConnected}
+            className="flex-1 rounded-lg bg-slate-900 border border-slate-600 px-3 py-2 text-sm focus:outline-none focus:border-blue-500"
+          />
+          <button
+            type="submit"
+            disabled={!isConnected || !draft.trim()}
+            aria-label="Send message"
+            className="px-3 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:bg-slate-700"
+          >
+            <Send className="w-5 h-5" />
+          </button>
+        </form>
+
+        {showSettings && (
+          <SettingsPanel
+            session={session}
+            comm={comm}
+            volume={volume}
+            onVolume={setVolume}
+            onRename={rename}
+            onLeave={leave}
+            onReconnect={reconnect}
+            onClose={() => setShowSettings(false)}
+          />
+        )}
+      </div>
     </div>
   );
 };
