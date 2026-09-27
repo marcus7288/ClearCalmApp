@@ -226,6 +226,77 @@ const measureLatency = async (pc, prev = {}) => {
   return { rttMs, bufferMs, viaRelay, counters: next };
 };
 
+// Each teammate's voice plays through Web Audio (MediaStreamSource -> Gain
+// -> speakers), with its own gain for volume and channel muting. iPhones play
+// Web Audio reliably, but often not a MediaStream <audio> element, and ignore
+// element volume. The <audio> element stays attached (muted) because Chrome
+// only delivers remote WebRTC audio to Web Audio while the stream is playing
+// in a media element.
+const createPlayer = () => {
+  const el = document.createElement("audio");
+  el.autoplay = true;
+  el.playsInline = true;
+  el.muted = true;
+  el.setAttribute("playsinline", "");
+  getAudioHost().appendChild(el);
+  return { el, source: null, gain: null };
+};
+
+const attachStream = (player, stream) => {
+  player.el.srcObject = stream;
+  player.el.play().catch(() => {});
+  try {
+    player.source?.disconnect();
+    const ctx = getAudioCtx();
+    if (!player.gain) {
+      player.gain = ctx.createGain();
+      player.gain.gain.value = 0;
+      player.gain.connect(ctx.destination);
+    }
+    player.source = ctx.createMediaStreamSource(stream);
+    player.source.connect(player.gain);
+  } catch {
+    // No Web Audio: fall back to playing through the element itself.
+    player.source = null;
+    player.gain?.disconnect();
+    player.gain = null;
+  }
+};
+
+// level: 0 (silent) to 1 (full volume).
+const setPlayerLevel = (player, level) => {
+  if (player.gain) {
+    player.gain.gain.value = level;
+    player.el.muted = true;
+  } else {
+    player.el.muted = level === 0;
+    if (level > 0) player.el.volume = level;
+  }
+  player.el.dataset.audible = level > 0 ? "1" : "0";
+};
+
+const destroyPlayer = (player) => {
+  player.el.pause();
+  player.el.srcObject = null;
+  player.el.remove();
+  player.source?.disconnect();
+  player.gain?.disconnect();
+};
+
+const playerStatus = (player) => {
+  if (!player) return "no audio yet";
+  const blocked = player.gain
+    ? audioCtx?.state !== "running"
+    : player.el.paused;
+  if (blocked) return "blocked - tap to enable";
+  return player.el.dataset.audible === "1"
+    ? "playing"
+    : "muted (other channel)";
+};
+
+// True until the browser lets this page play sound (it needs a tap first).
+export const isAudioBlocked = () => !!audioCtx && audioCtx.state !== "running";
+
 export const unlockAudio = () => {
   try {
     getAudioCtx();
@@ -238,10 +309,23 @@ export const unlockAudio = () => {
   });
 };
 
+// Every microphone track we create (the original and all copies). Leaving
+// stops all of them, so the phone's "mic in use" indicator turns off even if,
+// say, the mic test was still running.
+const micTracks = new Set();
+const trackMic = (stream) => {
+  stream.getTracks().forEach((t) => micTracks.add(t));
+  return stream;
+};
+const stopAllMicTracks = () => {
+  micTracks.forEach((t) => t.stop());
+  micTracks.clear();
+};
+
 // Microphone level (0-1) for the audio check in Settings.
 export const createLevelMeter = (stream) => {
   const ctx = getAudioCtx();
-  const clone = stream.clone();
+  const clone = trackMic(stream.clone());
   clone.getAudioTracks().forEach((t) => (t.enabled = true));
   const source = ctx.createMediaStreamSource(clone);
   const analyser = ctx.createAnalyser();
@@ -278,7 +362,7 @@ export default function useComm() {
   // the people who should hear you are switched on while you talk, so channel
   // and direct conversations never reach anyone else's device.
   const peerMicsRef = useRef({}); // peerId -> MediaStream
-  const audiosRef = useRef({}); // peerId -> HTMLAudioElement
+  const audiosRef = useRef({}); // peerId -> player (see createPlayer)
   const selfRef = useRef({
     name: "",
     channel: 1,
@@ -306,13 +390,12 @@ export default function useComm() {
   const applyAudio = useCallback(() => {
     const { volume, muted } = outputRef.current;
     const myChannel = selfRef.current.channel;
-    Object.entries(audiosRef.current).forEach(([peerId, audio]) => {
+    Object.entries(audiosRef.current).forEach(([peerId, player]) => {
       const peer = peersRef.current[peerId];
       const forMe =
         peer &&
         (peer.to === selfId || (!peer.to && peer.channel === myChannel));
-      audio.volume = volume;
-      audio.muted = muted || !forMe;
+      setPlayerLevel(player, muted || !forMe ? 0 : volume);
     });
   }, []);
 
@@ -320,7 +403,7 @@ export default function useComm() {
   const sendMicTo = useCallback((room, peerId) => {
     const mic = streamRef.current;
     if (!mic || peerMicsRef.current[peerId]) return;
-    const copy = mic.clone();
+    const copy = trackMic(mic.clone());
     copy.getAudioTracks().forEach((t) => (t.enabled = false));
     peerMicsRef.current[peerId] = copy;
     room.addStream(copy, { target: peerId });
@@ -350,7 +433,6 @@ export default function useComm() {
 
   const turnSourceRef = useRef(null); // which TURN relay is in use, if any
   const leavingRef = useRef(null); // pending room.leave(), awaited on rejoin
-  const lastJoinRef = useRef(null); // { team, passcode } for reconnect()
   const failuresRef = useRef({ count: 0, last: "" });
   const lastWarningRef = useRef({});
 
@@ -373,12 +455,9 @@ export default function useComm() {
     if (room) leavingRef.current = room.leave().catch(() => {});
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
+    stopAllMicTracks();
     Object.keys(peerMicsRef.current).forEach(dropMicFor);
-    Object.values(audiosRef.current).forEach((a) => {
-      a.pause();
-      a.srcObject = null;
-      a.remove();
-    });
+    Object.values(audiosRef.current).forEach(destroyPlayer);
     audiosRef.current = {};
     selfRef.current.talking = false;
     selfRef.current.to = null;
@@ -392,7 +471,6 @@ export default function useComm() {
     async ({ team, passcode, name, channel }) => {
       if (roomRef.current) return;
       selfRef.current = { team, name, channel, talking: false, to: null };
-      lastJoinRef.current = { team, passcode };
       failuresRef.current = { count: 0, last: "" };
       setStatus("connecting");
       setMessages(loadHistory(team));
@@ -457,6 +535,8 @@ export default function useComm() {
       };
 
       room.onPeerJoin = (peerId) => {
+        if (window.__ccDebug)
+          window.__ccDebug.log.push(["join", peerId, Date.now()]);
         presenceAction.send(
           presenceOf(selfRef.current, linksOf(peersRef.current)),
           {
@@ -473,14 +553,14 @@ export default function useComm() {
       };
 
       room.onPeerLeave = (peerId) => {
+        if (window.__ccDebug)
+          window.__ccDebug.log.push(["leave", peerId, Date.now()]);
         const peer = peersRef.current[peerId];
         if (peer) addSystem(`${peer.name} left`);
         dropMicFor(peerId);
-        const audio = audiosRef.current[peerId];
-        if (audio) {
-          audio.pause();
-          audio.srcObject = null;
-          audio.remove();
+        const player = audiosRef.current[peerId];
+        if (player) {
+          destroyPlayer(player);
           delete audiosRef.current[peerId];
         }
         setPeers((prev) => {
@@ -531,18 +611,13 @@ export default function useComm() {
       };
 
       room.onPeerStream = (stream, peerId) => {
-        let audio = audiosRef.current[peerId];
-        if (!audio) {
-          audio = document.createElement("audio");
-          audio.autoplay = true;
-          audio.playsInline = true;
-          audio.setAttribute("playsinline", "");
-          getAudioHost().appendChild(audio);
-          audiosRef.current[peerId] = audio;
+        let player = audiosRef.current[peerId];
+        if (!player) {
+          player = createPlayer();
+          audiosRef.current[peerId] = player;
         }
-        audio.srcObject = stream;
+        attachStream(player, stream);
         applyAudio();
-        audio.play().catch(() => {});
         tuneForLowLatency(room.getPeers()[peerId]);
       };
 
@@ -563,6 +638,7 @@ export default function useComm() {
           stream.getTracks().forEach((t) => t.stop());
           return;
         }
+        trackMic(stream);
         stream.getAudioTracks().forEach((t) => (t.enabled = false));
         streamRef.current = stream;
         Object.keys(room.getPeers()).forEach((id) => sendMicTo(room, id));
@@ -579,6 +655,16 @@ export default function useComm() {
 
   useEffect(() => disconnect, [disconnect]);
 
+  // Closing the tab or swiping the home-screen app away: leave the team right
+  // away so teammates don't keep seeing us until the connection times out.
+  useEffect(() => {
+    const onPageHide = (e) => {
+      if (!e.persisted) disconnect();
+    };
+    window.addEventListener("pagehide", onPageHide);
+    return () => window.removeEventListener("pagehide", onPageHide);
+  }, [disconnect]);
+
   // Persist chat history per team so it survives a page reload.
   useEffect(() => {
     if (selfRef.current.team && status === "online") {
@@ -587,6 +673,13 @@ export default function useComm() {
   }, [messages, status]);
 
   // Talk to everyone on our channel, or only to `targetId` if given.
+  if (typeof window !== "undefined" && window.__ccDebug) {
+    window.__ccDebug.mics = peerMicsRef;
+    window.__ccDebug.peers = peersRef;
+    window.__ccDebug.room = roomRef;
+    window.__ccDebug.players = audiosRef;
+  }
+
   const startTalking = useCallback(
     (targetId = null) => {
       if (!streamRef.current || selfRef.current.talking) return;
@@ -685,18 +778,11 @@ export default function useComm() {
     });
     const connections = roomRef.current ? roomRef.current.getPeers() : {};
     const peerRows = Object.entries(connections).map(([peerId, pc]) => {
-      const audio = audiosRef.current[peerId];
       return {
         peerId,
         name: peersRef.current[peerId]?.name || "(unknown)",
         connection: pc?.connectionState || "unknown",
-        audio: !audio
-          ? "no audio yet"
-          : audio.paused
-            ? "blocked - tap to enable"
-            : audio.muted
-              ? "muted (other channel)"
-              : "playing",
+        audio: playerStatus(audiosRef.current[peerId]),
       };
     });
     return {
@@ -709,15 +795,6 @@ export default function useComm() {
       secure: window.isSecureContext,
     };
   }, [micState, wakeLock]);
-
-  // Leave and rejoin with the same name, team, and channel.
-  const reconnect = useCallback(async () => {
-    const last = lastJoinRef.current;
-    if (!last) return;
-    const { name, channel } = selfRef.current;
-    disconnect();
-    await connect({ ...last, name, channel });
-  }, [connect, disconnect]);
 
   // Keep the screen on while connected. A sleeping phone drops off the team
   // (and makes teammates' reconnection attempts fail), which defeats the
@@ -805,7 +882,6 @@ export default function useComm() {
     getDiagnostics,
     getMicStream,
     getLatency,
-    reconnect,
     status,
     peers,
     messages,

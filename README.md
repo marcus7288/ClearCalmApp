@@ -101,14 +101,14 @@ into the page where anyone can read them, so the function above is safer.
 | Relays OK, Teammates connected: 0 | Team code or passcode doesn't match, or the other device isn't open. |
 | Teammate shows `failed` / `connecting` | The networks can't connect directly. Add a TURN relay (above). |
 | "Name · no link" in the roster | Others are connected to that person, but you aren't. Add a TURN relay (above). |
-| Teammate `connected` but audio `blocked` | Tap anywhere on the screen, which lets the phone start audio. |
+| Teammate `connected` but audio `blocked`, or an orange "Tap here to turn on sound" bar | Tap the bar (or anywhere). Phones only allow sound after a tap. |
 | Audio `muted (other channel)` | You're on different channels. Switch to the same one. |
 | No beep from "Test speaker" | Phone is on silent/vibrate (iPhone side switch) or volume is down. |
 | Mic test bar doesn't move | Mic permission is blocked. Allow it for the site, then leave and rejoin. |
 | Voice arrives late | Check "Delay from ..." (see below). |
 | "Can't reach your teammates right now" | You have no working connection to anyone. If "Failed connection attempts" keeps rising, one of the networks blocks direct connections: switch networks or add a TURN relay (above). |
 | "Someone ... has a different passcode" | A device with this team code has the wrong passcode (often an old tab or saved invite). Rejoin it with the right one. |
-| Someone dropped off | Tap **Reconnect** in Settings. The app keeps the screen awake while it's open ("Screen awake: on"), because a sleeping phone drops off the team. |
+| Someone dropped off | Tap **Reconnect** in Settings (the page reloads and rejoins on the same channel). The app keeps the screen awake while it's open ("Screen awake: on"), because a sleeping phone drops off the team. |
 
 ### Reducing lag
 
