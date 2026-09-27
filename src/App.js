@@ -15,12 +15,7 @@ import {
   VolumeX,
   X,
 } from "lucide-react";
-import useComm, {
-  chirp,
-  createLevelMeter,
-  isAudioBlocked,
-  unlockAudio,
-} from "./useComm";
+import useComm, { chirp, isAudioBlocked, unlockAudio } from "./useComm";
 
 // Netlify sets COMMIT_REF during the build (see netlify.toml), so the app can
 // show exactly which version is deployed.
@@ -190,9 +185,8 @@ const AudioCheck = ({ comm }) => {
 
   useEffect(() => {
     if (!testing) return undefined;
-    const stream = comm.getMicStream();
-    if (!stream) return undefined;
-    const meter = createLevelMeter(stream);
+    const meter = comm.startMicTest();
+    if (!meter) return undefined;
     let frame;
     const tick = () => {
       setLevel(meter.read());
