@@ -246,6 +246,7 @@ const AudioCheck = ({ comm }) => {
 
 const Diagnostics = ({ comm }) => {
   const [diag, setDiag] = useState(comm.getDiagnostics);
+  const [reconnecting, setReconnecting] = useState(false);
   const [latency, setLatency] = useState({});
 
   useEffect(() => {
@@ -324,9 +325,33 @@ const Diagnostics = ({ comm }) => {
         <div className="text-slate-400">
           Mic: {diag.micState} · TURN relay:{" "}
           {TURN_CONFIGURED ? "configured" : "not configured"} · HTTPS:{" "}
-          {diag.secure ? "yes" : "no (mic will not work)"}
+          {diag.secure ? "yes" : "no (mic will not work)"} · Screen awake:{" "}
+          {diag.wakeLock === "unsupported" ? "not supported" : diag.wakeLock}
         </div>
+        {diag.failures.count > 0 && (
+          <div className="text-slate-400">
+            Failed connection attempts: {diag.failures.count}
+            <div className="text-slate-500 break-words">
+              Last: {diag.failures.last}
+            </div>
+            <div className="text-slate-500">
+              A few are normal (a phone sleeping, a network switch). Many, with
+              no teammates connected, usually means a TURN relay is needed.
+            </div>
+          </div>
+        )}
       </div>
+      <button
+        onClick={async () => {
+          setReconnecting(true);
+          await comm.reconnect();
+          setReconnecting(false);
+        }}
+        disabled={reconnecting}
+        className="mt-2 w-full rounded-lg py-2 bg-slate-700 hover:bg-slate-600 text-sm disabled:text-slate-500"
+      >
+        {reconnecting ? "Reconnecting..." : "Reconnect"}
+      </button>
     </div>
   );
 };

@@ -229,6 +229,8 @@ export default function useComm() {
   const [messages, setMessages] = useState([]);
   const [micState, setMicState] = useState("off"); // off | ready | denied
   const [transmitting, setTransmitting] = useState(false);
+  const [wakeLock, setWakeLock] = useState("off"); // on | off | unsupported
+  const wakeLockRef = useRef(null);
 
   const roomRef = useRef(null);
   const actionsRef = useRef(null);
@@ -296,11 +298,28 @@ export default function useComm() {
     actionsRef.current?.presence.send(presenceOf(selfRef.current));
   }, []);
 
+  const leavingRef = useRef(null); // pending room.leave(), awaited on rejoin
+  const lastJoinRef = useRef(null); // { team, passcode } for reconnect()
+  const failuresRef = useRef({ count: 0, last: "" });
+  const lastWarningRef = useRef({});
+
+  // Post a system notice at most once a minute per kind, so a flaky
+  // connection doesn't flood the message feed.
+  const warnOnce = useCallback(
+    (kind, text) => {
+      const t = now();
+      if (t - (lastWarningRef.current[kind] || 0) < 60000) return;
+      lastWarningRef.current[kind] = t;
+      addSystem(text);
+    },
+    [addSystem],
+  );
+
   const disconnect = useCallback(() => {
     const room = roomRef.current;
     roomRef.current = null;
     actionsRef.current = null;
-    if (room) room.leave();
+    if (room) leavingRef.current = room.leave().catch(() => {});
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
     Object.keys(peerMicsRef.current).forEach(dropMicFor);
@@ -322,8 +341,14 @@ export default function useComm() {
     async ({ team, passcode, name, channel }) => {
       if (roomRef.current) return;
       selfRef.current = { team, name, channel, talking: false, to: null };
+      lastJoinRef.current = { team, passcode };
+      failuresRef.current = { count: 0, last: "" };
       setStatus("connecting");
       setMessages(loadHistory(team));
+      // Finish leaving any previous session first; joining the same room
+      // while it is still closing would hand back the closing instance.
+      if (leavingRef.current) await leavingRef.current;
+      if (roomRef.current) return;
 
       const config = {
         appId: APP_ID,
@@ -333,13 +358,32 @@ export default function useComm() {
       if (passcode) config.password = passcode;
 
       const room = joinRoom(config, team, {
-        onJoinError: ({ error }) => {
-          const reason = String(error?.message || error || "");
-          addSystem(
-            /password|decrypt/i.test(reason)
-              ? "A teammate could not connect: passcodes do not match."
-              : "A teammate could not connect (their network may block direct connections).",
-          );
+        // Individual connection attempts fail routinely (a phone going to
+        // sleep mid-handshake, an old tab left open, a network switch) and
+        // the library retries on its own. Only warn when it matters: a
+        // passcode mismatch, or when we can't reach anyone at all.
+        onJoinError: ({ error, peerId }) => {
+          const reason = String(error?.message || error || "unknown error");
+          failuresRef.current = {
+            count: failuresRef.current.count + 1,
+            last: reason,
+          };
+          if (/password/i.test(reason)) {
+            warnOnce(
+              "passcode",
+              "Someone using this team code has a different passcode, so they can't connect. Check that everyone uses the same passcode.",
+            );
+            return;
+          }
+          setTimeout(() => {
+            if (roomRef.current !== room) return;
+            const connected = Object.keys(room.getPeers());
+            if (connected.includes(peerId) || connected.length > 0) return;
+            warnOnce(
+              "network",
+              "Can't reach your teammates right now - a network may be blocking direct connections. The app keeps retrying. See Settings > Connection for details.",
+            );
+          }, 8000);
         },
       });
       roomRef.current = room;
@@ -357,6 +401,10 @@ export default function useComm() {
         presenceAction.send(presenceOf(selfRef.current), { target: peerId });
         const history = messagesRef.current.filter((m) => m.type !== "system");
         if (history.length) historyAction.send(history, { target: peerId });
+        // A join is always a fresh connection - even for a peer ID we've
+        // seen before (their tab reconnected before we noticed them leave) -
+        // so replace any mic copy tied to the old connection.
+        dropMicFor(peerId);
         sendMicTo(room, peerId);
       };
 
@@ -461,7 +509,7 @@ export default function useComm() {
         );
       }
     },
-    [addSystem, applyAudio, sendMicTo, dropMicFor],
+    [addSystem, applyAudio, sendMicTo, dropMicFor, warnOnce],
   );
 
   useEffect(() => disconnect, [disconnect]);
@@ -589,11 +637,67 @@ export default function useComm() {
     return {
       relays,
       peers: peerRows,
+      failures: failuresRef.current,
+      wakeLock,
       micState,
       turn: TURN_CONFIGURED,
       secure: window.isSecureContext,
     };
-  }, [micState]);
+  }, [micState, wakeLock]);
+
+  // Leave and rejoin with the same name, team, and channel.
+  const reconnect = useCallback(async () => {
+    const last = lastJoinRef.current;
+    if (!last) return;
+    const { name, channel } = selfRef.current;
+    disconnect();
+    await connect({ ...last, name, channel });
+  }, [connect, disconnect]);
+
+  // Keep the screen on while connected. A sleeping phone drops off the team
+  // (and makes teammates' reconnection attempts fail), which defeats the
+  // point of a push-to-talk radio.
+  const ensureWakeLock = useCallback(async () => {
+    if (!roomRef.current || document.visibilityState !== "visible") return;
+    if (!("wakeLock" in navigator)) {
+      setWakeLock("unsupported");
+      return;
+    }
+    if (wakeLockRef.current && !wakeLockRef.current.released) return;
+    try {
+      const lock = await navigator.wakeLock.request("screen");
+      wakeLockRef.current = lock;
+      setWakeLock("on");
+      lock.addEventListener("release", () => setWakeLock("off"));
+    } catch {
+      setWakeLock("off");
+    }
+  }, []);
+
+  useEffect(() => {
+    if (status !== "online") {
+      wakeLockRef.current?.release().catch(() => {});
+      wakeLockRef.current = null;
+      return undefined;
+    }
+    ensureWakeLock();
+    // Coming back to the app (or back online): re-take the wake lock and
+    // re-announce ourselves so teammates refresh our status right away.
+    const refresh = () => {
+      if (document.visibilityState !== "visible") return;
+      ensureWakeLock();
+      broadcastPresence();
+    };
+    document.addEventListener("visibilitychange", refresh);
+    window.addEventListener("online", refresh);
+    // Some browsers only grant the wake lock during a tap.
+    window.addEventListener("pointerdown", ensureWakeLock, true);
+    return () => {
+      document.removeEventListener("visibilitychange", refresh);
+      window.removeEventListener("online", refresh);
+      window.removeEventListener("pointerdown", ensureWakeLock, true);
+    };
+  }, [status, ensureWakeLock, broadcastPresence]);
 
   const getMicStream = useCallback(() => streamRef.current, []);
 
@@ -636,6 +740,7 @@ export default function useComm() {
     getDiagnostics,
     getMicStream,
     getLatency,
+    reconnect,
     status,
     peers,
     messages,

@@ -88,6 +88,9 @@ credentials from a TURN account meant for public web apps.
 | No beep from "Test speaker" | Phone is on silent/vibrate (iPhone side switch) or volume is down. |
 | Mic test bar doesn't move | Mic permission is blocked. Allow it for the site, then leave and rejoin. |
 | Voice arrives late | Check "Delay from ..." (see below). |
+| "Can't reach your teammates right now" | You have no working connection to anyone. If "Failed connection attempts" keeps rising, one of the networks blocks direct connections: switch networks or add a TURN relay (above). |
+| "Someone ... has a different passcode" | A device with this team code has the wrong passcode (often an old tab or saved invite). Rejoin it with the right one. |
+| Someone dropped off | Tap **Reconnect** in Settings. The app keeps the screen awake while it's open ("Screen awake: on"), because a sleeping phone drops off the team. |
 
 ### Reducing lag
 
