@@ -232,7 +232,26 @@ const measureLatency = async (pc, prev = {}) => {
       rttMs = Math.round(r.currentRoundTripTime * 1000);
       viaRelay = byId.get(r.localCandidateId)?.candidateType === "relay";
     }
+    if (r.type === "outbound-rtp" && r.kind === "audio") {
+      if (prev.outTs != null && r.timestamp > prev.outTs) {
+        next.outKbps = Math.round(
+          ((r.bytesSent - prev.outBytes) * 8) / (r.timestamp - prev.outTs),
+        );
+      }
+      next.outBytes = r.bytesSent;
+      next.outTs = r.timestamp;
+    }
     if (r.type === "inbound-rtp" && r.kind === "audio") {
+      if (prev.inTs != null && r.timestamp > prev.inTs) {
+        next.inKbps = Math.round(
+          ((r.bytesReceived - prev.inBytes) * 8) / (r.timestamp - prev.inTs),
+        );
+      }
+      next.inBytes = r.bytesReceived;
+      next.inTs = r.timestamp;
+      if (typeof r.audioLevel === "number") {
+        next.inLevel = Math.round(r.audioLevel * 100);
+      }
       const delay = r.jitterBufferDelay || 0;
       const count = r.jitterBufferEmittedCount || 0;
       if (prev.count != null && count > prev.count) {
@@ -245,7 +264,15 @@ const measureLatency = async (pc, prev = {}) => {
     }
   });
   next.bufferMs = bufferMs;
-  return { rttMs, bufferMs, viaRelay, counters: next };
+  return {
+    rttMs,
+    bufferMs,
+    viaRelay,
+    inKbps: next.inKbps ?? null,
+    inLevel: next.inLevel ?? null,
+    outKbps: next.outKbps ?? null,
+    counters: next,
+  };
 };
 
 // Each teammate's voice plays through its own <audio> element; muting it
@@ -342,15 +369,17 @@ const stopAllMicTracks = () => {
 // sound comes out wherever the *mic* is: the phone's own mic means the phone
 // speaker. Picking the Bluetooth headphones' mic sends sound to the
 // headphones too. "auto" picks connected headphones when there are any.
-const MIC_PREF_KEY = "clearcalm:mic";
+// v2: the default changed to "system" (never switch mics automatically),
+// so older saved "auto" choices start from the new default.
+const MIC_PREF_KEY = "clearcalm:mic2";
 const HEADSET_RE =
   /airpods|bluetooth|headset|headphone|earbud|buds|beats|hands-?free|jabra|bose|wh-|wf-/i;
 
 export const loadMicChoice = () => {
   try {
-    return localStorage.getItem(MIC_PREF_KEY) || "auto";
+    return localStorage.getItem(MIC_PREF_KEY) || "system";
   } catch {
-    return "auto";
+    return "system";
   }
 };
 
@@ -388,7 +417,8 @@ const listMicDevices = async () => {
 
 // Which device a choice means right now (undefined = the system default).
 const resolveMic = (choice, devices) => {
-  if (choice && choice !== "auto") {
+  if (!choice || choice === "system") return undefined;
+  if (choice !== "auto") {
     return devices.some((d) => d.deviceId === choice) ? choice : undefined;
   }
   return devices.find((d) => HEADSET_RE.test(d.label))?.deviceId;
@@ -801,7 +831,9 @@ export default function useComm() {
         // saved/default mic first, then switch to headphones if "auto" finds
         // some (see useMicSwitching below).
         const saved = loadMicChoice();
-        const stream = await openMic(saved === "auto" ? undefined : saved);
+        const stream = await openMic(
+          saved === "auto" || saved === "system" ? undefined : saved,
+        );
         if (roomRef.current !== room) {
           stream.getTracks().forEach((t) => t.stop());
           return;
@@ -1043,6 +1075,10 @@ export default function useComm() {
       setMicChoice(choice);
       const devices = await listMicDevices();
       setMics(devices);
+      // "Phone default": never reopen the mic on our own. (Reopening the mic
+      // mid-call is what broke iPhone sound.) Only an explicit pick, or the
+      // mic disappearing, reopens it.
+      if (choice === "system" && !manual && !force) return;
       const old = streamRef.current;
       if (!old || !roomRef.current || switchingRef.current) return;
       const oldTrack = old.getAudioTracks()[0];

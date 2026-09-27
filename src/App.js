@@ -216,6 +216,7 @@ const AudioCheck = ({ comm }) => {
         disabled={comm.micState !== "ready"}
         className="w-full mb-1 rounded-lg bg-slate-900 border border-slate-600 px-3 py-2 text-sm"
       >
+        <option value="system">Phone default - don't switch</option>
         <option value="auto">Automatic - use headphones when connected</option>
         {comm.mics.map((m) => (
           <option key={m.deviceId} value={m.deviceId}>
@@ -352,6 +353,18 @@ const Diagnostics = ({ comm, onReconnect }) => {
                   </span>
                 )}
                 {l.viaRelay && " (via TURN relay)"}
+                <div>
+                  Audio in:{" "}
+                  <span
+                    className={
+                      l.inKbps > 5 ? "text-green-400" : "text-slate-400"
+                    }
+                  >
+                    {l.inKbps ?? "?"} kbps
+                  </span>
+                  {l.inLevel != null && ` · level ${l.inLevel}%`} · out:{" "}
+                  {l.outKbps ?? "?"} kbps
+                </div>
               </div>
             );
           })}

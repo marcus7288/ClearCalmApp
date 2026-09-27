@@ -20,10 +20,11 @@ phones and laptops.
   chirp and see "(to you)". Tap "Back to channel" to return to group talk.
   Your microphone is connected only to the people meant to hear you, so
   neither direct nor channel audio is ever sent to anyone else's device.
-- **Headphones.** Settings -> Microphone / headphones. "Automatic" switches to
-  Bluetooth headphones whenever they're connected, and back when they aren't.
-  On iPhone, sound plays through the same device as the microphone, so this is
-  how you hear through AirPods or other headphones.
+- **Headphones.** Settings -> Microphone / headphones. The default, "Phone
+  default - don't switch", never changes the mic during a call. "Automatic"
+  switches to Bluetooth headphones whenever they're connected. You can also
+  pick a specific mic. On iPhone, sound plays through the same device as the
+  microphone.
 - **Invite link.** Open Settings and choose "Copy invite link". The link fills
   in the team code and passcode.
 - **Message history** is kept on each device and shared with teammates who
@@ -110,6 +111,7 @@ into the page where anyone can read them, so the function above is safer.
 | Teammate `connected` but audio `blocked`, or an orange "Tap here to turn on sound" bar | Tap the bar (or anywhere). Phones only allow sound after a tap. |
 | Audio `muted (other channel)` | You're on different channels. Switch to the same one. |
 | No beep from "Test speaker" | Phone is on silent/vibrate (iPhone side switch) or volume is down. |
+| Not sure whether audio is reaching you | Settings -> Connection -> "Audio in" for a teammate. It should jump (e.g. 20-40 kbps) while they hold talk. If it stays at 0, their phone isn't sending. If it rises but you hear nothing, the problem is playback on your phone. |
 | Teammate shows `playing` but you hear nothing (often with a large "buffer" delay) | Tap **Restart sound** in Settings. If it keeps happening with Bluetooth headphones, pick the iPhone microphone in Microphone / headphones to use the phone speaker instead. |
 | iPhone plays through its speaker, not your headphones | Settings -> Microphone / headphones: choose the headphones (or "Automatic"). Check "In use" shows them. |
 | Mic test bar doesn't move | Mic permission is blocked. Allow it for the site, then leave and rejoin. |
