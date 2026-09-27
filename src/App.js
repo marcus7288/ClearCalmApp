@@ -246,10 +246,18 @@ const AudioCheck = ({ comm }) => {
 
 const Diagnostics = ({ comm }) => {
   const [diag, setDiag] = useState(comm.getDiagnostics);
+  const [latency, setLatency] = useState({});
 
   useEffect(() => {
-    const id = setInterval(() => setDiag(comm.getDiagnostics()), 1000);
-    return () => clearInterval(id);
+    let alive = true;
+    const id = setInterval(() => {
+      setDiag(comm.getDiagnostics());
+      comm.getLatency().then((l) => alive && setLatency(l));
+    }, 1000);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
   }, [comm]);
 
   const relaysUp = diag.relays.filter((r) => r.state === "connected").length;
@@ -280,6 +288,32 @@ const Diagnostics = ({ comm }) => {
               <span className={stateColor(p.audio)}>{p.audio}</span>
             </div>
           ))}
+          {diag.peers.map((p) => {
+            const l = latency[p.peerId];
+            if (!l || (l.rttMs == null && l.bufferMs == null)) return null;
+            const oneWay =
+              l.rttMs != null
+                ? Math.round(l.rttMs / 2) + (l.bufferMs || 0)
+                : null;
+            return (
+              <div key={`${p.peerId}-lat`} className="text-slate-400">
+                Delay from {p.name}: network{" "}
+                {l.rttMs != null ? `${Math.round(l.rttMs / 2)} ms` : "?"}
+                {" + "}buffer {l.bufferMs != null ? `${l.bufferMs} ms` : "?"}
+                {oneWay != null && (
+                  <span
+                    className={
+                      oneWay > 300 ? "text-yellow-400" : "text-green-400"
+                    }
+                  >
+                    {" "}
+                    ≈ {oneWay} ms
+                  </span>
+                )}
+                {l.viaRelay && " (via TURN relay)"}
+              </div>
+            );
+          })}
           {!diag.peers.length && relaysUp > 0 && (
             <p className="text-slate-400">
               Waiting for teammates. Check they use the same team code and

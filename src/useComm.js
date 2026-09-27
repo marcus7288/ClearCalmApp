@@ -121,6 +121,66 @@ const getAudioHost = () => {
   return audioHost;
 };
 
+// WebRTC normally buffers incoming audio to smooth out network hiccups, and
+// that buffer can grow to half a second or more. For push-to-talk we'd rather
+// hear people immediately, so ask each audio receiver to keep its buffer as
+// small as the network allows. (Supported in Chrome, Edge, and recent Safari;
+// other browsers ignore it.)
+const tuneForLowLatency = (pc) => {
+  if (!pc?.getReceivers) return;
+  pc.getReceivers().forEach((receiver) => {
+    if (receiver.track?.kind !== "audio") return;
+    try {
+      if ("jitterBufferTarget" in receiver && receiver.jitterBufferTarget !== 0)
+        receiver.jitterBufferTarget = 0;
+    } catch {
+      // not supported
+    }
+    try {
+      if (receiver.playoutDelayHint !== 0) receiver.playoutDelayHint = 0;
+    } catch {
+      // not supported
+    }
+  });
+};
+
+// Measure round-trip time and receive-buffer delay for one connection.
+// `prev` holds the last counters so the buffer figure reflects the last
+// second rather than the whole call.
+const measureLatency = async (pc, prev = {}) => {
+  const stats = await pc.getStats();
+  let rttMs = null;
+  let viaRelay = false;
+  let bufferMs = prev.bufferMs ?? null;
+  const next = { ...prev };
+  const byId = new Map();
+  stats.forEach((r) => byId.set(r.id, r));
+  stats.forEach((r) => {
+    if (
+      r.type === "candidate-pair" &&
+      r.state === "succeeded" &&
+      (r.nominated || r.selected) &&
+      r.currentRoundTripTime != null
+    ) {
+      rttMs = Math.round(r.currentRoundTripTime * 1000);
+      viaRelay = byId.get(r.localCandidateId)?.candidateType === "relay";
+    }
+    if (r.type === "inbound-rtp" && r.kind === "audio") {
+      const delay = r.jitterBufferDelay || 0;
+      const count = r.jitterBufferEmittedCount || 0;
+      if (prev.count != null && count > prev.count) {
+        bufferMs = Math.round(
+          ((delay - prev.delay) / (count - prev.count)) * 1000,
+        );
+      }
+      next.delay = delay;
+      next.count = count;
+    }
+  });
+  next.bufferMs = bufferMs;
+  return { rttMs, bufferMs, viaRelay, counters: next };
+};
+
 export const unlockAudio = () => {
   try {
     getAudioCtx();
@@ -333,6 +393,7 @@ export default function useComm() {
         audio.srcObject = stream;
         applyAudio();
         audio.play().catch(() => {});
+        tuneForLowLatency(room.getPeers()[peerId]);
       };
 
       setStatus("online");
@@ -482,10 +543,45 @@ export default function useComm() {
 
   const getMicStream = useCallback(() => streamRef.current, []);
 
+  // Keep every connection's audio buffer small (new receivers can appear when
+  // peers renegotiate, so re-apply every couple of seconds).
+  useEffect(() => {
+    if (status !== "online") return undefined;
+    const id = setInterval(() => {
+      const room = roomRef.current;
+      if (room) Object.values(room.getPeers()).forEach(tuneForLowLatency);
+    }, 2000);
+    return () => clearInterval(id);
+  }, [status]);
+
+  // Per-teammate latency figures for the diagnostics panel.
+  const latencyCountersRef = useRef({});
+  const getLatency = useCallback(async () => {
+    const room = roomRef.current;
+    if (!room) return {};
+    const result = {};
+    await Promise.all(
+      Object.entries(room.getPeers()).map(async ([peerId, pc]) => {
+        try {
+          const m = await measureLatency(
+            pc,
+            latencyCountersRef.current[peerId],
+          );
+          latencyCountersRef.current[peerId] = m.counters;
+          result[peerId] = m;
+        } catch {
+          // connection closing
+        }
+      }),
+    );
+    return result;
+  }, []);
+
   return {
     selfId,
     getDiagnostics,
     getMicStream,
+    getLatency,
     status,
     peers,
     messages,
