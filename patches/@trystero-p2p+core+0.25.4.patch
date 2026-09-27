@@ -1,0 +1,58 @@
+diff --git a/node_modules/@trystero-p2p/core/dist/signal-handler.mjs b/node_modules/@trystero-p2p/core/dist/signal-handler.mjs
+index cf12b0b..d7d0c1b 100644
+--- a/node_modules/@trystero-p2p/core/dist/signal-handler.mjs
++++ b/node_modules/@trystero-p2p/core/dist/signal-handler.mjs
+@@ -202,6 +202,29 @@ const ensureOffer = (ctx, state, peerId, relayId) => {
+ 	})().finally(() => state.offerInitPromise = null);
+ 	return state.offerInitPromise;
+ };
++// [clearcalm patch] An offer can be lost when it's published before the other
++// peer has finished subscribing to its own topic (relays don't store these
++// ephemeral events). Upstream then waits for the offer to expire (~1 min)
++// before trying again. Re-send the same offer (and its ICE candidates) a
++// couple of times, and whenever the peer announces again while still
++// waiting, so a lost first offer costs seconds, not a minute.
++const offerResendDelaysMs = [2500, 7000];
++const offerResendMinGapMs = 1500;
++const resendOffer = (ctx, state, peerId, relayId, peerTopic, signalPeer, offerInfo) => {
++	if (ctx.isLeaving() || state.connectedPeer || state.answeringPeer || state.offerAnswered) return;
++	if (state.offerPeer !== offerInfo.peer || state.offerId !== offerInfo.offerId || offerInfo.peer.isDead) return;
++	if (state.offerRelays[relayId] !== true) return;
++	const sentAt = state.offerSentAt?.[relayId] ?? 0;
++	if (Date.now() - sentAt < offerResendMinGapMs) return;
++	(state.offerSentAt ||= [])[relayId] = Date.now();
++	signalPeer(peerTopic, toJson({
++		peerId: selfId,
++		offerId: offerInfo.offerId,
++		offer: offerInfo.offer,
++		...ctx.isPassive ? { passive: true } : {}
++	}));
++	state.offerSignalBacklog.forEach((signal) => state.offerSignalRelays[relayId]?.(signal));
++};
+ const handleAnnouncement = async (ctx, relayId, peerId, shared, signalPeer) => {
+ 	if (shared) {
+ 		ctx.attachSharedPeerToRoom(peerId, shared);
+@@ -242,6 +265,10 @@ const handleAnnouncement = async (ctx, relayId, peerId, shared, signalPeer) => {
+ 	}));
+ 	didSendOffer = true;
+ 	state.offerSignalBacklog.forEach((signal) => state.offerSignalRelays[relayId]?.(signal));
++	(state.offerSentAt ||= [])[relayId] = Date.now();
++	state.offerResend ||= [];
++	state.offerResend[relayId] = () => resendOffer(ctx, state, peerId, relayId, peerTopic, signalPeer, offerInfo);
++	offerResendDelaysMs.forEach((ms) => setTimeout(() => state.offerResend?.[relayId]?.(), ms));
+ };
+ const handleOffer = async (ctx, relayId, peerId, offer, offerId, hasOutgoingOfferHint, signalPeer) => {
+ 	const state = getState(ctx.peerStates, peerId);
+@@ -420,7 +447,11 @@ const createSignalHandler = (ctx) => (relayId) => async (topic, msg, signalPeer)
+ 			if (!ctx.isLeaving() && !announcePeerState.connectedPeer) signalPeer(peerSelfTopic, toJson({ peerId: selfId }));
+ 			return;
+ 		}
+-		if (announcePeerState.offerRelays[relayId]) return;
++		if (announcePeerState.offerRelays[relayId]) {
++			// Still announcing, so they haven't seen our offer: send it again.
++			if (announcePeerState.offerRelays[relayId] === true) announcePeerState.offerResend?.[relayId]?.();
++			return;
++		}
+ 		announcePeerState.offerRelays[relayId] = offerRelayPlaceholder;
+ 		updateStatus(announcePeerState);
+ 	}
