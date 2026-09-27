@@ -309,10 +309,23 @@ export const unlockAudio = () => {
   });
 };
 
+// Every microphone track we create (the original and all copies). Leaving
+// stops all of them, so the phone's "mic in use" indicator turns off even if,
+// say, the mic test was still running.
+const micTracks = new Set();
+const trackMic = (stream) => {
+  stream.getTracks().forEach((t) => micTracks.add(t));
+  return stream;
+};
+const stopAllMicTracks = () => {
+  micTracks.forEach((t) => t.stop());
+  micTracks.clear();
+};
+
 // Microphone level (0-1) for the audio check in Settings.
 export const createLevelMeter = (stream) => {
   const ctx = getAudioCtx();
-  const clone = stream.clone();
+  const clone = trackMic(stream.clone());
   clone.getAudioTracks().forEach((t) => (t.enabled = true));
   const source = ctx.createMediaStreamSource(clone);
   const analyser = ctx.createAnalyser();
@@ -390,7 +403,7 @@ export default function useComm() {
   const sendMicTo = useCallback((room, peerId) => {
     const mic = streamRef.current;
     if (!mic || peerMicsRef.current[peerId]) return;
-    const copy = mic.clone();
+    const copy = trackMic(mic.clone());
     copy.getAudioTracks().forEach((t) => (t.enabled = false));
     peerMicsRef.current[peerId] = copy;
     room.addStream(copy, { target: peerId });
@@ -442,6 +455,7 @@ export default function useComm() {
     if (room) leavingRef.current = room.leave().catch(() => {});
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
+    stopAllMicTracks();
     Object.keys(peerMicsRef.current).forEach(dropMicFor);
     Object.values(audiosRef.current).forEach(destroyPlayer);
     audiosRef.current = {};
@@ -624,6 +638,7 @@ export default function useComm() {
           stream.getTracks().forEach((t) => t.stop());
           return;
         }
+        trackMic(stream);
         stream.getAudioTracks().forEach((t) => (t.enabled = false));
         streamRef.current = stream;
         Object.keys(room.getPeers()).forEach((id) => sendMicTo(room, id));
