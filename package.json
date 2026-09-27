@@ -2,7 +2,7 @@
   "name": "clear-calm-comm",
   "version": "1.0.0",
   "private": true,
-  "description": "Clear Calm — real-time push-to-talk and text communication for teams",
+  "description": "Clear Calm \u2014 real-time push-to-talk and text communication for teams",
   "dependencies": {
     "lucide-react": "0.540.0",
     "react": "^19.0.0",
@@ -12,17 +12,21 @@
   },
   "devDependencies": {
     "autoprefixer": "10.4.21",
+    "patch-package": "^8.0.1",
     "postcss": "8.5.6",
     "tailwindcss": "3.4.17"
   },
   "scripts": {
+    "postinstall": "patch-package",
     "start": "react-scripts start",
     "build": "react-scripts build",
     "test": "react-scripts test --env=jsdom",
     "eject": "react-scripts eject"
   },
   "eslintConfig": {
-    "extends": ["react-app"]
+    "extends": [
+      "react-app"
+    ]
   },
   "browserslist": [
     ">0.2%",

@@ -18,9 +18,12 @@ phones and laptops.
   The talk button turns purple ("Hold to talk to Sarah"), and only that person
   hears you, even if they're on a different channel. They hear a two-tone
   chirp and see "(to you)". Tap "Back to channel" to return to group talk.
-  Each teammate gets a separate copy of your microphone, and only the copies
-  for the people meant to hear you are switched on. So neither direct nor
-  channel audio is ever sent to anyone else's device.
+  Your microphone is connected only to the people meant to hear you, so
+  neither direct nor channel audio is ever sent to anyone else's device.
+- **Headphones.** Settings -> Microphone / headphones. "Automatic" switches to
+  Bluetooth headphones whenever they're connected, and back when they aren't.
+  On iPhone, sound plays through the same device as the microphone, so this is
+  how you hear through AirPods or other headphones.
 - **Invite link.** Open Settings and choose "Copy invite link". The link fills
   in the team code and passcode.
 - **Message history** is kept on each device and shared with teammates who
@@ -104,6 +107,7 @@ into the page where anyone can read them, so the function above is safer.
 | Teammate `connected` but audio `blocked`, or an orange "Tap here to turn on sound" bar | Tap the bar (or anywhere). Phones only allow sound after a tap. |
 | Audio `muted (other channel)` | You're on different channels. Switch to the same one. |
 | No beep from "Test speaker" | Phone is on silent/vibrate (iPhone side switch) or volume is down. |
+| iPhone plays through its speaker, not your headphones | Settings -> Microphone / headphones: choose the headphones (or "Automatic"). Check "In use" shows them. |
 | Mic test bar doesn't move | Mic permission is blocked. Allow it for the site, then leave and rejoin. |
 | Voice arrives late | Check "Delay from ..." (see below). |
 | "Can't reach your teammates right now" | You have no working connection to anyone. If "Failed connection attempts" keeps rising, one of the networks blocks direct connections: switch networks or add a TURN relay (above). |
