@@ -453,13 +453,32 @@ const SettingsPanel = ({
           )}
         </div>
 
+        <div>
+          <p className="text-sm text-slate-300 mb-2">Messages</p>
+          <div className="flex gap-2">
+            <button
+              onClick={() => comm.clearHistory("me")}
+              className="flex-1 rounded-lg py-2 bg-slate-700 hover:bg-slate-600 text-sm"
+            >
+              Clear on this phone
+            </button>
+            <button
+              onClick={() => {
+                if (
+                  window.confirm(
+                    "Clear all messages for everyone on the team? This can't be undone.",
+                  )
+                )
+                  comm.clearHistory("team");
+              }}
+              className="flex-1 rounded-lg py-2 bg-slate-700 hover:bg-slate-600 text-sm"
+            >
+              Clear for everyone
+            </button>
+          </div>
+        </div>
+
         <div className="flex gap-2">
-          <button
-            onClick={comm.clearHistory}
-            className="flex-1 rounded-lg py-2 bg-slate-700 hover:bg-slate-600 text-sm"
-          >
-            Clear my message history
-          </button>
           <button
             onClick={onLeave}
             className="flex-1 flex items-center justify-center gap-2 rounded-lg py-2 bg-red-600 hover:bg-red-700 text-sm"
