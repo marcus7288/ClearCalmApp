@@ -1,29 +1,28 @@
 {
-  "name": "react",
+  "name": "clear-calm-comm",
   "version": "1.0.0",
-  "description": "",
-  "keywords": [],
-  "main": "src/index.tsx",
+  "private": true,
+  "description": "Clear Calm — real-time push-to-talk and text communication for teams",
   "dependencies": {
+    "lucide-react": "0.540.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "react-scripts": "^5.0.0",
-    "lucide-react": "0.540.0",
-    "tailwindcss": "4.1.12",
-    "autoprefixer": "10.4.21",
-    "postcss": "8.5.6"
+    "react-scripts": "5.0.1",
+    "trystero": "0.25.4"
   },
   "devDependencies": {
-    "@types/react": "19.0.0",
-    "@types/react-dom": "19.0.0",
-    "loader-utils": "3.2.1",
-    "typescript": "5.7.2"
+    "autoprefixer": "10.4.21",
+    "postcss": "8.5.6",
+    "tailwindcss": "3.4.17"
   },
   "scripts": {
     "start": "react-scripts start",
     "build": "react-scripts build",
     "test": "react-scripts test --env=jsdom",
     "eject": "react-scripts eject"
+  },
+  "eslintConfig": {
+    "extends": ["react-app"]
   },
   "browserslist": [
     ">0.2%",
