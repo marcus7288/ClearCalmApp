@@ -226,12 +226,10 @@ const measureLatency = async (pc, prev = {}) => {
   return { rttMs, bufferMs, viaRelay, counters: next };
 };
 
-// Each teammate's voice plays through Web Audio (MediaStreamSource -> Gain
-// -> speakers), with its own gain for volume and channel muting. iPhones play
-// Web Audio reliably, but often not a MediaStream <audio> element, and ignore
-// element volume. The <audio> element stays attached (muted) because Chrome
-// only delivers remote WebRTC audio to Web Audio while the stream is playing
-// in a media element.
+// Each teammate's voice plays through its own <audio> element; muting it
+// handles channel filtering. (This is the playback path that worked on
+// iPhones. Note iOS ignores element volume: the phone's volume buttons
+// control loudness there.)
 const createPlayer = () => {
   const el = document.createElement("audio");
   el.autoplay = true;
@@ -239,39 +237,18 @@ const createPlayer = () => {
   el.muted = true;
   el.setAttribute("playsinline", "");
   getAudioHost().appendChild(el);
-  return { el, source: null, gain: null };
+  return { el };
 };
 
 const attachStream = (player, stream) => {
   player.el.srcObject = stream;
   player.el.play().catch(() => {});
-  try {
-    player.source?.disconnect();
-    const ctx = getAudioCtx();
-    if (!player.gain) {
-      player.gain = ctx.createGain();
-      player.gain.gain.value = 0;
-      player.gain.connect(ctx.destination);
-    }
-    player.source = ctx.createMediaStreamSource(stream);
-    player.source.connect(player.gain);
-  } catch {
-    // No Web Audio: fall back to playing through the element itself.
-    player.source = null;
-    player.gain?.disconnect();
-    player.gain = null;
-  }
 };
 
 // level: 0 (silent) to 1 (full volume).
 const setPlayerLevel = (player, level) => {
-  if (player.gain) {
-    player.gain.gain.value = level;
-    player.el.muted = true;
-  } else {
-    player.el.muted = level === 0;
-    if (level > 0) player.el.volume = level;
-  }
+  player.el.muted = level === 0;
+  if (level > 0) player.el.volume = level;
   player.el.dataset.audible = level > 0 ? "1" : "0";
 };
 
@@ -279,27 +256,29 @@ const destroyPlayer = (player) => {
   player.el.pause();
   player.el.srcObject = null;
   player.el.remove();
-  player.source?.disconnect();
-  player.gain?.disconnect();
 };
 
 const playerStatus = (player) => {
   if (!player) return "no audio yet";
-  const blocked = player.gain
-    ? audioCtx?.state !== "running"
-    : player.el.paused;
-  if (blocked) return "blocked - tap to enable";
+  if (player.el.paused) return "blocked - tap to enable";
   return player.el.dataset.audible === "1"
     ? "playing"
     : "muted (other channel)";
 };
 
 // True until the browser lets this page play sound (it needs a tap first).
-export const isAudioBlocked = () => !!audioCtx && audioCtx.state !== "running";
+export const isAudioBlocked = () =>
+  (!!audioCtx && audioCtx.state !== "running") ||
+  (!!audioHost &&
+    [...audioHost.querySelectorAll("audio")].some(
+      (a) => a.paused && a.srcObject,
+    ));
 
 export const unlockAudio = () => {
   try {
-    getAudioCtx();
+    const ctx = getAudioCtx();
+    // iOS can leave the context "interrupted" after the mic starts.
+    if (ctx.state !== "running") ctx.resume().catch(() => {});
   } catch {
     // ignore
   }
@@ -309,9 +288,8 @@ export const unlockAudio = () => {
   });
 };
 
-// Every microphone track we create (the original and all copies). Leaving
-// stops all of them, so the phone's "mic in use" indicator turns off even if,
-// say, the mic test was still running.
+// Every microphone track we create. Leaving stops all of them, so the
+// phone's "mic in use" indicator turns off.
 const micTracks = new Set();
 const trackMic = (stream) => {
   stream.getTracks().forEach((t) => micTracks.add(t));
@@ -323,11 +301,9 @@ const stopAllMicTracks = () => {
 };
 
 // Microphone level (0-1) for the audio check in Settings.
-export const createLevelMeter = (stream) => {
+const createLevelMeter = (stream) => {
   const ctx = getAudioCtx();
-  const clone = trackMic(stream.clone());
-  clone.getAudioTracks().forEach((t) => (t.enabled = true));
-  const source = ctx.createMediaStreamSource(clone);
+  const source = ctx.createMediaStreamSource(stream);
   const analyser = ctx.createAnalyser();
   analyser.fftSize = 512;
   source.connect(analyser);
@@ -339,10 +315,7 @@ export const createLevelMeter = (stream) => {
       data.forEach((v) => (peak = Math.max(peak, Math.abs(v - 128))));
       return Math.min(1, peak / 64);
     },
-    stop: () => {
-      source.disconnect();
-      clone.getTracks().forEach((t) => t.stop());
-    },
+    stop: () => source.disconnect(),
   };
 };
 
@@ -357,11 +330,16 @@ export default function useComm() {
 
   const roomRef = useRef(null);
   const actionsRef = useRef(null);
-  const streamRef = useRef(null); // the microphone (never sent directly)
-  // Each teammate gets their own copy of the mic track. Only the copies for
-  // the people who should hear you are switched on while you talk, so channel
-  // and direct conversations never reach anyone else's device.
-  const peerMicsRef = useRef({}); // peerId -> MediaStream
+  const streamRef = useRef(null); // the microphone
+  // One microphone track is added to every teammate's connection, but each
+  // connection's sender only carries it while that person should hear us;
+  // otherwise it sends nothing. So channel and direct conversations never
+  // reach anyone else's device. (Earlier versions gave each teammate a
+  // separate *copy* of the mic, switched on and off; iPhones went silent
+  // with that.)
+  const sendersRef = useRef({}); // peerId -> RTCRtpSender | "pending"
+  const recipientsRef = useRef(new Set()); // peer IDs hearing us right now
+  const micTestRef = useRef(false); // Settings mic test running
   const audiosRef = useRef({}); // peerId -> player (see createPlayer)
   const selfRef = useRef({
     name: "",
@@ -399,19 +377,52 @@ export default function useComm() {
     });
   }, []);
 
-  // Give a teammate their own (switched-off) copy of our microphone.
-  const sendMicTo = useCallback((room, peerId) => {
-    const mic = streamRef.current;
-    if (!mic || peerMicsRef.current[peerId]) return;
-    const copy = trackMic(mic.clone());
-    copy.getAudioTracks().forEach((t) => (t.enabled = false));
-    peerMicsRef.current[peerId] = copy;
-    room.addStream(copy, { target: peerId });
+  // Point a teammate's sender at the mic (they hear us) or at nothing.
+  const routeTo = useCallback((peerId, on) => {
+    const sender = sendersRef.current[peerId];
+    if (!sender || sender === "pending") return;
+    const track = on ? streamRef.current?.getAudioTracks()[0] || null : null;
+    if (sender.track !== track) sender.replaceTrack(track).catch(() => {});
   }, []);
 
+  // Add our microphone to a teammate's connection, silent until we talk to them.
+  const sendMicTo = useCallback(
+    (room, peerId) => {
+      const mic = streamRef.current;
+      const track = mic?.getAudioTracks()[0];
+      if (!track || sendersRef.current[peerId]) return;
+      sendersRef.current[peerId] = "pending";
+      // A per-teammate stream *wrapper* around the one mic track (not a copy
+      // of the track): the library tracks streams per object, and sharing a
+      // single stream object between connections could stall one of them.
+      room.addStream(new MediaStream([track]), { target: peerId });
+      // The library creates the connection's audio sender shortly after
+      // addStream; look for it for a few seconds rather than assuming it's
+      // there yet (it often isn't when two people join at the same moment).
+      let tries = 0;
+      const find = () => {
+        if (sendersRef.current[peerId] !== "pending") return;
+        const sender = room
+          .getPeers()
+          [peerId]?.getSenders()
+          .find((sn) => sn.track === track);
+        if (sender) {
+          sendersRef.current[peerId] = sender;
+          routeTo(peerId, recipientsRef.current.has(peerId));
+        } else if (++tries < 50) {
+          setTimeout(find, 100);
+        } else {
+          delete sendersRef.current[peerId];
+        }
+      };
+      find();
+    },
+    [routeTo],
+  );
+
   const dropMicFor = useCallback((peerId) => {
-    peerMicsRef.current[peerId]?.getTracks().forEach((t) => t.stop());
-    delete peerMicsRef.current[peerId];
+    delete sendersRef.current[peerId];
+    recipientsRef.current.delete(peerId);
   }, []);
 
   useEffect(applyAudio, [peers, applyAudio]);
@@ -456,7 +467,8 @@ export default function useComm() {
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
     stopAllMicTracks();
-    Object.keys(peerMicsRef.current).forEach(dropMicFor);
+    sendersRef.current = {};
+    recipientsRef.current = new Set();
     Object.values(audiosRef.current).forEach(destroyPlayer);
     audiosRef.current = {};
     selfRef.current.talking = false;
@@ -465,7 +477,7 @@ export default function useComm() {
     setTransmitting(false);
     setMicState("off");
     setStatus("offline");
-  }, [dropMicFor]);
+  }, []);
 
   const connect = useCallback(
     async ({ team, passcode, name, channel }) => {
@@ -674,7 +686,7 @@ export default function useComm() {
 
   // Talk to everyone on our channel, or only to `targetId` if given.
   if (typeof window !== "undefined" && window.__ccDebug) {
-    window.__ccDebug.mics = peerMicsRef;
+    window.__ccDebug.senders = sendersRef;
     window.__ccDebug.peers = peersRef;
     window.__ccDebug.room = roomRef;
     window.__ccDebug.players = audiosRef;
@@ -693,28 +705,28 @@ export default function useComm() {
       me.to = targetId || null;
       // Announce first so listeners unmute before the audio arrives.
       broadcastPresence();
-      recipients.forEach((id) =>
-        peerMicsRef.current[id]
-          ?.getAudioTracks()
-          .forEach((t) => (t.enabled = true)),
-      );
+      recipientsRef.current = new Set(recipients);
+      streamRef.current.getAudioTracks().forEach((t) => (t.enabled = true));
+      recipients.forEach((id) => routeTo(id, true));
       setTransmitting(true);
       chirp(1200);
     },
-    [broadcastPresence],
+    [broadcastPresence, routeTo],
   );
 
   const stopTalking = useCallback(() => {
     if (!selfRef.current.talking) return;
-    Object.values(peerMicsRef.current).forEach((s) =>
-      s.getAudioTracks().forEach((t) => (t.enabled = false)),
-    );
+    streamRef.current
+      ?.getAudioTracks()
+      .forEach((t) => (t.enabled = micTestRef.current));
+    recipientsRef.current = new Set();
+    Object.keys(sendersRef.current).forEach((id) => routeTo(id, false));
     selfRef.current.talking = false;
     selfRef.current.to = null;
     setTransmitting(false);
     chirp(700);
     broadcastPresence();
-  }, [broadcastPresence]);
+  }, [broadcastPresence, routeTo]);
 
   const sendText = useCallback((text) => {
     const clean = text.trim().slice(0, 1000);
@@ -841,7 +853,25 @@ export default function useComm() {
     };
   }, [status, ensureWakeLock, broadcastPresence]);
 
-  const getMicStream = useCallback(() => streamRef.current, []);
+  // Mic level meter for Settings. The mic track is switched on while testing,
+  // which is safe: no teammate's sender carries it unless we're talking.
+  const startMicTest = useCallback(() => {
+    const mic = streamRef.current;
+    if (!mic) return null;
+    micTestRef.current = true;
+    mic.getAudioTracks().forEach((t) => (t.enabled = true));
+    const meter = createLevelMeter(mic);
+    return {
+      read: meter.read,
+      stop: () => {
+        meter.stop();
+        micTestRef.current = false;
+        mic
+          .getAudioTracks()
+          .forEach((t) => (t.enabled = selfRef.current.talking));
+      },
+    };
+  }, []);
 
   // Keep every connection's audio buffer small (new receivers can appear when
   // peers renegotiate, so re-apply every couple of seconds).
@@ -880,7 +910,7 @@ export default function useComm() {
   return {
     selfId,
     getDiagnostics,
-    getMicStream,
+    startMicTest,
     getLatency,
     status,
     peers,
