@@ -1,0 +1,11 @@
+{
+  "short_name": "Clear Calm",
+  "name": "Clear Calm Communication",
+  "icons": [
+    { "src": "favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ],
+  "start_url": ".",
+  "display": "standalone",
+  "theme_color": "#0f172a",
+  "background_color": "#0f172a"
+}
