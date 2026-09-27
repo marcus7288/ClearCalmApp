@@ -183,9 +183,10 @@ const AudioCheck = ({ comm }) => {
   const [level, setLevel] = useState(0);
   const [testing, setTesting] = useState(false);
 
+  const { startMicTest, activeMic } = comm;
   useEffect(() => {
     if (!testing) return undefined;
-    const meter = comm.startMicTest();
+    const meter = startMicTest();
     if (!meter) return undefined;
     let frame;
     const tick = () => {
@@ -198,10 +199,31 @@ const AudioCheck = ({ comm }) => {
       meter.stop();
       setLevel(0);
     };
-  }, [testing, comm]);
+    // activeMic: restart the meter when the microphone changes.
+  }, [testing, startMicTest, activeMic]);
 
   return (
     <div>
+      <p className="text-sm text-slate-300 mb-2">Microphone / headphones</p>
+      <select
+        value={comm.micChoice}
+        onChange={(e) => comm.switchMic(e.target.value)}
+        disabled={comm.micState !== "ready"}
+        className="w-full mb-1 rounded-lg bg-slate-900 border border-slate-600 px-3 py-2 text-sm"
+      >
+        <option value="auto">Automatic - use headphones when connected</option>
+        {comm.mics.map((m) => (
+          <option key={m.deviceId} value={m.deviceId}>
+            {m.label}
+          </option>
+        ))}
+      </select>
+      <p className="text-xs text-slate-500 mb-4">
+        In use: {comm.activeMic || "none"}. On iPhone, sound plays through the
+        same device as the microphone, so choose your Bluetooth headphones here
+        to hear through them.
+      </p>
+
       <p className="text-sm text-slate-300 mb-2">Audio check</p>
       <div className="flex gap-2">
         <button
@@ -324,7 +346,8 @@ const Diagnostics = ({ comm, onReconnect }) => {
           )}
         </div>
         <div className="text-slate-400">
-          Mic: {diag.micState} · TURN relay:{" "}
+          Mic: {diag.micState}
+          {diag.mic ? ` (${diag.mic})` : ""} · TURN relay:{" "}
           {diag.turn ? `on (${diag.turn})` : "not set up"} · HTTPS:{" "}
           {diag.secure ? "yes" : "no (mic will not work)"} · Screen awake:{" "}
           {diag.wakeLock === "unsupported" ? "not supported" : diag.wakeLock}

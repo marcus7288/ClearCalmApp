@@ -300,6 +300,72 @@ const stopAllMicTracks = () => {
   micTracks.clear();
 };
 
+// Microphone / headset choice. On iPhones, while a page is using the mic,
+// sound comes out wherever the *mic* is: the phone's own mic means the phone
+// speaker. Picking the Bluetooth headphones' mic sends sound to the
+// headphones too. "auto" picks connected headphones when there are any.
+const MIC_PREF_KEY = "clearcalm:mic";
+const HEADSET_RE =
+  /airpods|bluetooth|headset|headphone|earbud|buds|beats|hands-?free|jabra|bose|wh-|wf-/i;
+
+export const loadMicChoice = () => {
+  try {
+    return localStorage.getItem(MIC_PREF_KEY) || "auto";
+  } catch {
+    return "auto";
+  }
+};
+
+const saveMicChoice = (choice) => {
+  try {
+    localStorage.setItem(MIC_PREF_KEY, choice);
+  } catch {
+    // ignore
+  }
+};
+
+const micConstraints = (deviceId) => ({
+  audio: {
+    echoCancellation: true,
+    noiseSuppression: true,
+    autoGainControl: true,
+    ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
+  },
+  video: false,
+});
+
+const listMicDevices = async () => {
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    return devices
+      .filter((d) => d.kind === "audioinput" && d.deviceId)
+      .filter(
+        (d) => d.deviceId !== "default" && d.deviceId !== "communications",
+      )
+      .map((d) => ({ deviceId: d.deviceId, label: d.label || "Microphone" }));
+  } catch {
+    return [];
+  }
+};
+
+// Which device a choice means right now (undefined = the system default).
+const resolveMic = (choice, devices) => {
+  if (choice && choice !== "auto") {
+    return devices.some((d) => d.deviceId === choice) ? choice : undefined;
+  }
+  return devices.find((d) => HEADSET_RE.test(d.label))?.deviceId;
+};
+
+// Open the chosen mic, falling back to the default if that device fails.
+const openMic = async (deviceId) => {
+  try {
+    return await navigator.mediaDevices.getUserMedia(micConstraints(deviceId));
+  } catch (err) {
+    if (!deviceId) throw err;
+    return navigator.mediaDevices.getUserMedia(micConstraints());
+  }
+};
+
 // Microphone level (0-1) for the audio check in Settings.
 const createLevelMeter = (stream) => {
   const ctx = getAudioCtx();
@@ -326,6 +392,9 @@ export default function useComm() {
   const [micState, setMicState] = useState("off"); // off | ready | denied
   const [transmitting, setTransmitting] = useState(false);
   const [wakeLock, setWakeLock] = useState("off"); // on | off | unsupported
+  const [mics, setMics] = useState([]); // available microphones / headsets
+  const [micChoice, setMicChoice] = useState(loadMicChoice); // "auto" | deviceId
+  const [activeMic, setActiveMic] = useState(""); // label of the mic in use
   const wakeLockRef = useRef(null);
 
   const roomRef = useRef(null);
@@ -638,14 +707,11 @@ export default function useComm() {
 
       // Ask for the microphone. Text still works if the user says no.
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true,
-          },
-          video: false,
-        });
+        // Device names are only visible after mic permission, so open the
+        // saved/default mic first, then switch to headphones if "auto" finds
+        // some (see useMicSwitching below).
+        const saved = loadMicChoice();
+        const stream = await openMic(saved === "auto" ? undefined : saved);
         if (roomRef.current !== room) {
           stream.getTracks().forEach((t) => t.stop());
           return;
@@ -654,6 +720,7 @@ export default function useComm() {
         stream.getAudioTracks().forEach((t) => (t.enabled = false));
         streamRef.current = stream;
         Object.keys(room.getPeers()).forEach((id) => sendMicTo(room, id));
+        setActiveMic(stream.getAudioTracks()[0]?.label || "");
         setMicState("ready");
       } catch {
         setMicState("denied");
@@ -801,12 +868,13 @@ export default function useComm() {
       relays,
       peers: peerRows,
       failures: failuresRef.current,
+      mic: activeMic,
       wakeLock,
       micState,
       turn: turnSourceRef.current,
       secure: window.isSecureContext,
     };
-  }, [micState, wakeLock]);
+  }, [micState, wakeLock, activeMic]);
 
   // Keep the screen on while connected. A sleeping phone drops off the team
   // (and makes teammates' reconnection attempts fail), which defeats the
@@ -852,6 +920,69 @@ export default function useComm() {
       window.removeEventListener("pointerdown", ensureWakeLock, true);
     };
   }, [status, ensureWakeLock, broadcastPresence]);
+
+  // Switch microphone / headset without dropping the call. iPhones allow one
+  // capture at a time, so the old mic is stopped before the new one opens.
+  const switchingRef = useRef(false);
+  const switchMic = useCallback(
+    async (choice = loadMicChoice(), { force = false } = {}) => {
+      saveMicChoice(choice);
+      setMicChoice(choice);
+      const devices = await listMicDevices();
+      setMics(devices);
+      const old = streamRef.current;
+      if (!old || !roomRef.current || switchingRef.current) return;
+      const oldTrack = old.getAudioTracks()[0];
+      const wanted = resolveMic(choice, devices);
+      const current = oldTrack?.getSettings?.().deviceId;
+      const live = oldTrack?.readyState === "live";
+      // Already on the right mic? (With no headphones in "auto", that's
+      // anything except a headset that has just gone away.)
+      const onRightMic = wanted
+        ? current === wanted
+        : !(choice === "auto" && HEADSET_RE.test(oldTrack?.label || ""));
+      if (!force && live && onRightMic) return;
+      switchingRef.current = true;
+      try {
+        old.getTracks().forEach((t) => {
+          t.stop();
+          micTracks.delete(t);
+        });
+        const stream = trackMic(await openMic(wanted));
+        const track = stream.getAudioTracks()[0];
+        track.enabled = selfRef.current.talking || micTestRef.current;
+        streamRef.current = stream;
+        // Re-point every teammate who should be hearing us at the new mic.
+        Object.keys(sendersRef.current).forEach((id) =>
+          routeTo(id, recipientsRef.current.has(id)),
+        );
+        setActiveMic(track.label || "");
+        setMics(await listMicDevices());
+      } catch {
+        setMicState("denied");
+      } finally {
+        switchingRef.current = false;
+      }
+    },
+    [routeTo],
+  );
+
+  // Once connected (and whenever headphones connect or disconnect), follow the
+  // chosen mic - in "auto", that means headphones whenever they're present.
+  useEffect(() => {
+    if (micState !== "ready") return undefined;
+    switchMic();
+    const onChange = () => switchMic();
+    navigator.mediaDevices?.addEventListener?.("devicechange", onChange);
+    // If the mic in use disappears (headphones switched off), reopen one.
+    const track = streamRef.current?.getAudioTracks()[0];
+    const onEnded = () => switchMic(undefined, { force: true });
+    track?.addEventListener("ended", onEnded);
+    return () => {
+      navigator.mediaDevices?.removeEventListener?.("devicechange", onChange);
+      track?.removeEventListener("ended", onEnded);
+    };
+  }, [micState, activeMic, switchMic]);
 
   // Mic level meter for Settings. The mic track is switched on while testing,
   // which is safe: no teammate's sender carries it unless we're talking.
@@ -911,6 +1042,10 @@ export default function useComm() {
     selfId,
     getDiagnostics,
     startMicTest,
+    mics,
+    micChoice,
+    activeMic,
+    switchMic,
     getLatency,
     status,
     peers,
