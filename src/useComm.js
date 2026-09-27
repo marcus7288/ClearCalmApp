@@ -45,7 +45,13 @@ const TURN_CONFIG = TURN_CONFIGURED
 
 const now = () => Date.now();
 
-const presenceOf = ({ name, channel, talking }) => ({ name, channel, talking });
+// `to` is the peer ID someone is talking to directly, or null for the channel.
+const presenceOf = ({ name, channel, talking, to }) => ({
+  name,
+  channel,
+  talking,
+  to: to || null,
+});
 
 const makeId = () =>
   `${selfId}-${now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
@@ -121,6 +127,66 @@ const getAudioHost = () => {
   return audioHost;
 };
 
+// WebRTC normally buffers incoming audio to smooth out network hiccups, and
+// that buffer can grow to half a second or more. For push-to-talk we'd rather
+// hear people immediately, so ask each audio receiver to keep its buffer as
+// small as the network allows. (Supported in Chrome, Edge, and recent Safari;
+// other browsers ignore it.)
+const tuneForLowLatency = (pc) => {
+  if (!pc?.getReceivers) return;
+  pc.getReceivers().forEach((receiver) => {
+    if (receiver.track?.kind !== "audio") return;
+    try {
+      if ("jitterBufferTarget" in receiver && receiver.jitterBufferTarget !== 0)
+        receiver.jitterBufferTarget = 0;
+    } catch {
+      // not supported
+    }
+    try {
+      if (receiver.playoutDelayHint !== 0) receiver.playoutDelayHint = 0;
+    } catch {
+      // not supported
+    }
+  });
+};
+
+// Measure round-trip time and receive-buffer delay for one connection.
+// `prev` holds the last counters so the buffer figure reflects the last
+// second rather than the whole call.
+const measureLatency = async (pc, prev = {}) => {
+  const stats = await pc.getStats();
+  let rttMs = null;
+  let viaRelay = false;
+  let bufferMs = prev.bufferMs ?? null;
+  const next = { ...prev };
+  const byId = new Map();
+  stats.forEach((r) => byId.set(r.id, r));
+  stats.forEach((r) => {
+    if (
+      r.type === "candidate-pair" &&
+      r.state === "succeeded" &&
+      (r.nominated || r.selected) &&
+      r.currentRoundTripTime != null
+    ) {
+      rttMs = Math.round(r.currentRoundTripTime * 1000);
+      viaRelay = byId.get(r.localCandidateId)?.candidateType === "relay";
+    }
+    if (r.type === "inbound-rtp" && r.kind === "audio") {
+      const delay = r.jitterBufferDelay || 0;
+      const count = r.jitterBufferEmittedCount || 0;
+      if (prev.count != null && count > prev.count) {
+        bufferMs = Math.round(
+          ((delay - prev.delay) / (count - prev.count)) * 1000,
+        );
+      }
+      next.delay = delay;
+      next.count = count;
+    }
+  });
+  next.bufferMs = bufferMs;
+  return { rttMs, bufferMs, viaRelay, counters: next };
+};
+
 export const unlockAudio = () => {
   try {
     getAudioCtx();
@@ -159,16 +225,26 @@ export const createLevelMeter = (stream) => {
 
 export default function useComm() {
   const [status, setStatus] = useState("offline"); // offline | connecting | online
-  const [peers, setPeers] = useState({}); // peerId -> { name, channel, talking }
+  const [peers, setPeers] = useState({}); // peerId -> { name, channel, talking, to }
   const [messages, setMessages] = useState([]);
   const [micState, setMicState] = useState("off"); // off | ready | denied
   const [transmitting, setTransmitting] = useState(false);
 
   const roomRef = useRef(null);
   const actionsRef = useRef(null);
-  const streamRef = useRef(null);
+  const streamRef = useRef(null); // the microphone (never sent directly)
+  // Each teammate gets their own copy of the mic track. Only the copies for
+  // the people who should hear you are switched on while you talk, so channel
+  // and direct conversations never reach anyone else's device.
+  const peerMicsRef = useRef({}); // peerId -> MediaStream
   const audiosRef = useRef({}); // peerId -> HTMLAudioElement
-  const selfRef = useRef({ name: "", channel: 1, talking: false, team: "" });
+  const selfRef = useRef({
+    name: "",
+    channel: 1,
+    talking: false,
+    to: null,
+    team: "",
+  });
   const peersRef = useRef({});
   const outputRef = useRef({ volume: 0.75, muted: false });
 
@@ -185,15 +261,33 @@ export default function useComm() {
     );
   }, []);
 
-  // Only play audio from peers who are on the same channel as us.
+  // Play audio from peers on our channel, or anyone talking to us directly.
   const applyAudio = useCallback(() => {
     const { volume, muted } = outputRef.current;
     const myChannel = selfRef.current.channel;
     Object.entries(audiosRef.current).forEach(([peerId, audio]) => {
       const peer = peersRef.current[peerId];
+      const forMe =
+        peer &&
+        (peer.to === selfId || (!peer.to && peer.channel === myChannel));
       audio.volume = volume;
-      audio.muted = muted || !peer || peer.channel !== myChannel;
+      audio.muted = muted || !forMe;
     });
+  }, []);
+
+  // Give a teammate their own (switched-off) copy of our microphone.
+  const sendMicTo = useCallback((room, peerId) => {
+    const mic = streamRef.current;
+    if (!mic || peerMicsRef.current[peerId]) return;
+    const copy = mic.clone();
+    copy.getAudioTracks().forEach((t) => (t.enabled = false));
+    peerMicsRef.current[peerId] = copy;
+    room.addStream(copy, { target: peerId });
+  }, []);
+
+  const dropMicFor = useCallback((peerId) => {
+    peerMicsRef.current[peerId]?.getTracks().forEach((t) => t.stop());
+    delete peerMicsRef.current[peerId];
   }, []);
 
   useEffect(applyAudio, [peers, applyAudio]);
@@ -209,6 +303,7 @@ export default function useComm() {
     if (room) room.leave();
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
+    Object.keys(peerMicsRef.current).forEach(dropMicFor);
     Object.values(audiosRef.current).forEach((a) => {
       a.pause();
       a.srcObject = null;
@@ -216,16 +311,17 @@ export default function useComm() {
     });
     audiosRef.current = {};
     selfRef.current.talking = false;
+    selfRef.current.to = null;
     setPeers({});
     setTransmitting(false);
     setMicState("off");
     setStatus("offline");
-  }, []);
+  }, [dropMicFor]);
 
   const connect = useCallback(
     async ({ team, passcode, name, channel }) => {
       if (roomRef.current) return;
-      selfRef.current = { team, name, channel, talking: false };
+      selfRef.current = { team, name, channel, talking: false, to: null };
       setStatus("connecting");
       setMessages(loadHistory(team));
 
@@ -261,14 +357,13 @@ export default function useComm() {
         presenceAction.send(presenceOf(selfRef.current), { target: peerId });
         const history = messagesRef.current.filter((m) => m.type !== "system");
         if (history.length) historyAction.send(history, { target: peerId });
-        if (streamRef.current) {
-          room.addStream(streamRef.current, { target: peerId });
-        }
+        sendMicTo(room, peerId);
       };
 
       room.onPeerLeave = (peerId) => {
         const peer = peersRef.current[peerId];
         if (peer) addSystem(`${peer.name} left`);
+        dropMicFor(peerId);
         const audio = audiosRef.current[peerId];
         if (audio) {
           audio.pause();
@@ -289,16 +384,18 @@ export default function useComm() {
           name: data.name.slice(0, 40) || "Unknown",
           channel: Number(data.channel) || 1,
           talking: !!data.talking,
+          to: typeof data.to === "string" ? data.to : null,
         };
         const previous = peersRef.current[peerId];
         if (!previous) addSystem(`${info.name} joined`);
-        if (
-          info.talking &&
-          !previous?.talking &&
-          info.channel === selfRef.current.channel &&
-          !outputRef.current.muted
-        ) {
-          chirp(880);
+        if (info.talking && !previous?.talking && !outputRef.current.muted) {
+          if (info.to === selfId) {
+            // Two-tone chirp for a direct call.
+            chirp(990);
+            setTimeout(() => chirp(1320), 140);
+          } else if (!info.to && info.channel === selfRef.current.channel) {
+            chirp(880);
+          }
         }
         setPeers((prev) => ({ ...prev, [peerId]: info }));
       };
@@ -333,6 +430,7 @@ export default function useComm() {
         audio.srcObject = stream;
         applyAudio();
         audio.play().catch(() => {});
+        tuneForLowLatency(room.getPeers()[peerId]);
       };
 
       setStatus("online");
@@ -354,7 +452,7 @@ export default function useComm() {
         }
         stream.getAudioTracks().forEach((t) => (t.enabled = false));
         streamRef.current = stream;
-        room.addStream(stream);
+        Object.keys(room.getPeers()).forEach((id) => sendMicTo(room, id));
         setMicState("ready");
       } catch {
         setMicState("denied");
@@ -363,7 +461,7 @@ export default function useComm() {
         );
       }
     },
-    [addSystem, applyAudio],
+    [addSystem, applyAudio, sendMicTo, dropMicFor],
   );
 
   useEffect(() => disconnect, [disconnect]);
@@ -375,21 +473,38 @@ export default function useComm() {
     }
   }, [messages, status]);
 
-  const startTalking = useCallback(() => {
-    const stream = streamRef.current;
-    if (!stream || selfRef.current.talking) return;
-    stream.getAudioTracks().forEach((t) => (t.enabled = true));
-    selfRef.current.talking = true;
-    setTransmitting(true);
-    chirp(1200);
-    broadcastPresence();
-  }, [broadcastPresence]);
+  // Talk to everyone on our channel, or only to `targetId` if given.
+  const startTalking = useCallback(
+    (targetId = null) => {
+      if (!streamRef.current || selfRef.current.talking) return;
+      const me = selfRef.current;
+      const recipients = targetId
+        ? [targetId]
+        : Object.keys(peersRef.current).filter(
+            (id) => peersRef.current[id].channel === me.channel,
+          );
+      me.talking = true;
+      me.to = targetId || null;
+      // Announce first so listeners unmute before the audio arrives.
+      broadcastPresence();
+      recipients.forEach((id) =>
+        peerMicsRef.current[id]
+          ?.getAudioTracks()
+          .forEach((t) => (t.enabled = true)),
+      );
+      setTransmitting(true);
+      chirp(1200);
+    },
+    [broadcastPresence],
+  );
 
   const stopTalking = useCallback(() => {
-    const stream = streamRef.current;
     if (!selfRef.current.talking) return;
-    stream?.getAudioTracks().forEach((t) => (t.enabled = false));
+    Object.values(peerMicsRef.current).forEach((s) =>
+      s.getAudioTracks().forEach((t) => (t.enabled = false)),
+    );
     selfRef.current.talking = false;
+    selfRef.current.to = null;
     setTransmitting(false);
     chirp(700);
     broadcastPresence();
@@ -482,10 +597,45 @@ export default function useComm() {
 
   const getMicStream = useCallback(() => streamRef.current, []);
 
+  // Keep every connection's audio buffer small (new receivers can appear when
+  // peers renegotiate, so re-apply every couple of seconds).
+  useEffect(() => {
+    if (status !== "online") return undefined;
+    const id = setInterval(() => {
+      const room = roomRef.current;
+      if (room) Object.values(room.getPeers()).forEach(tuneForLowLatency);
+    }, 2000);
+    return () => clearInterval(id);
+  }, [status]);
+
+  // Per-teammate latency figures for the diagnostics panel.
+  const latencyCountersRef = useRef({});
+  const getLatency = useCallback(async () => {
+    const room = roomRef.current;
+    if (!room) return {};
+    const result = {};
+    await Promise.all(
+      Object.entries(room.getPeers()).map(async ([peerId, pc]) => {
+        try {
+          const m = await measureLatency(
+            pc,
+            latencyCountersRef.current[peerId],
+          );
+          latencyCountersRef.current[peerId] = m.counters;
+          result[peerId] = m;
+        } catch {
+          // connection closing
+        }
+      }),
+    );
+    return result;
+  }, []);
+
   return {
     selfId,
     getDiagnostics,
     getMicStream,
+    getLatency,
     status,
     peers,
     messages,

@@ -14,6 +14,13 @@ phones and laptops.
   on.
 - **Push to talk.** Hold the big button, or hold the Space bar on a computer.
   A short chirp marks the start and end of each transmission.
+- **Direct (private) talk.** Tap a teammate's name under the channel buttons.
+  The talk button turns purple ("Hold to talk to Sarah"), and only that person
+  hears you, even if they're on a different channel. They hear a two-tone
+  chirp and see "(to you)". Tap "Back to channel" to return to group talk.
+  Each teammate gets a separate copy of your microphone, and only the copies
+  for the people meant to hear you are switched on. So neither direct nor
+  channel audio is ever sent to anyone else's device.
 - **Invite link.** Open Settings and choose "Copy invite link". The link fills
   in the team code and passcode.
 - **Message history** is kept on each device and shared with teammates who
@@ -80,6 +87,28 @@ credentials from a TURN account meant for public web apps.
 | Audio `muted (other channel)` | You're on different channels. Switch to the same one. |
 | No beep from "Test speaker" | Phone is on silent/vibrate (iPhone side switch) or volume is down. |
 | Mic test bar doesn't move | Mic permission is blocked. Allow it for the site, then leave and rejoin. |
+| Voice arrives late | Check "Delay from ..." (see below). |
+
+### Reducing lag
+
+The app already tells each phone to keep its incoming-audio buffer as small as
+possible. Settings -> Connection shows the delay from each teammate, split into
+**network** (travel time) and **buffer** (time the phone holds audio to smooth
+out hiccups):
+
+- **High network delay, or "(via TURN relay)":** the audio takes a long route.
+  Put both phones on the same Wi-Fi, or choose a TURN provider with a server
+  near you.
+- **High buffer delay:** the connection is jittery (weak Wi-Fi or cellular
+  signal). Move closer to the router or switch networks. The buffer shrinks
+  automatically once the connection steadies.
+- **Both numbers low but it still sounds late:** the delay is in the phone's
+  own audio output. Bluetooth earbuds and speakers commonly add 150-300 ms;
+  use the phone speaker or wired earphones. Android phones also add some
+  output delay of their own.
+
+Around 150-300 ms end to end is normal for internet voice, including
+commercial push-to-talk apps.
 
 Tip: when testing, use two separate devices. Two tabs on one computer can
 cancel each other's audio through echo cancellation.
