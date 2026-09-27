@@ -15,7 +15,12 @@ import {
   VolumeX,
   X,
 } from "lucide-react";
-import useComm, { chirp, isAudioBlocked, unlockAudio } from "./useComm";
+import useComm, {
+  chirp,
+  isAudioBlocked,
+  restartSound,
+  unlockAudio,
+} from "./useComm";
 
 // Netlify sets COMMIT_REF during the build (see netlify.toml), so the app can
 // show exactly which version is deployed.
@@ -246,6 +251,15 @@ const AudioCheck = ({ comm }) => {
           {testing ? "Stop mic test" : "Test microphone"}
         </button>
       </div>
+      <button
+        onClick={() => {
+          restartSound();
+          chirp(660, 0.3, 0.3);
+        }}
+        className="w-full mt-2 rounded-lg py-2 bg-slate-700 hover:bg-slate-600 text-sm"
+      >
+        Restart sound (if you can't hear teammates)
+      </button>
       {testing && (
         <div className="mt-2">
           <div className="h-3 rounded bg-slate-900 overflow-hidden">

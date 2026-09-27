@@ -110,6 +110,7 @@ into the page where anyone can read them, so the function above is safer.
 | Teammate `connected` but audio `blocked`, or an orange "Tap here to turn on sound" bar | Tap the bar (or anywhere). Phones only allow sound after a tap. |
 | Audio `muted (other channel)` | You're on different channels. Switch to the same one. |
 | No beep from "Test speaker" | Phone is on silent/vibrate (iPhone side switch) or volume is down. |
+| Teammate shows `playing` but you hear nothing (often with a large "buffer" delay) | Tap **Restart sound** in Settings. If it keeps happening with Bluetooth headphones, pick the iPhone microphone in Microphone / headphones to use the phone speaker instead. |
 | iPhone plays through its speaker, not your headphones | Settings -> Microphone / headphones: choose the headphones (or "Automatic"). Check "In use" shows them. |
 | Mic test bar doesn't move | Mic permission is blocked. Allow it for the site, then leave and rejoin. |
 | Voice arrives late | Check "Delay from ..." (see below). |
