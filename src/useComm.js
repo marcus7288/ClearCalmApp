@@ -310,6 +310,22 @@ export const unlockAudio = () => {
   });
 };
 
+// Fully restart every teammate's player: detach and re-attach its stream,
+// then play. When the iPhone's audio route changes (for example to Bluetooth
+// headphones) while a player is running, it can keep reporting "playing"
+// with its output cut off, and incoming audio just piles up in the buffer.
+// Re-attaching reconnects it to the current output.
+export const restartSound = () => {
+  unlockAudio();
+  audioHost?.querySelectorAll("audio").forEach((a) => {
+    const stream = a.srcObject;
+    if (!stream) return;
+    a.srcObject = null;
+    a.srcObject = stream;
+    a.play().catch(() => {});
+  });
+};
+
 // Every microphone track we create. Leaving stops all of them, so the
 // phone's "mic in use" indicator turns off.
 const micTracks = new Set();
@@ -1080,10 +1096,11 @@ export default function useComm() {
         );
         setActiveMic(track.label || "");
         setMicSwitches((n) => n + 1);
-        // iPhones can pause playback while the mic changes; restart it.
-        audioHost?.querySelectorAll("audio").forEach((a) => {
-          if (a.paused && a.srcObject) a.play().catch(() => {});
-        });
+        // The audio route just changed (e.g. to Bluetooth headphones);
+        // reconnect teammates' players to the new output. Again shortly after,
+        // since iOS finishes moving the route asynchronously.
+        restartSound();
+        setTimeout(restartSound, 800);
         setMics(await listMicDevices());
       } catch {
         setMicState("denied");
