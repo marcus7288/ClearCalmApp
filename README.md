@@ -27,7 +27,10 @@ phones and laptops.
 - **Invite link.** Open Settings and choose "Copy invite link". The link fills
   in the team code and passcode.
 - **Message history** is kept on each device and shared with teammates who
-  join later.
+  join later. Settings -> Messages: **Clear on this phone** (stays cleared,
+  even when teammates share their history again) or **Clear for everyone**
+  (clears every phone on the team, including phones that were offline, the
+  next time they connect).
 
 Voice and text travel **directly between devices** over encrypted WebRTC.
 Public [Nostr](https://nostr.com) relays are used only to introduce devices to

@@ -116,6 +116,28 @@ const saveHistory = (team, messages) => {
   }
 };
 
+// When messages were cleared. "mine" = cleared on this phone only; "team" =
+// someone cleared them for everyone (shared with teammates, including ones
+// who were offline, so old copies can't come back from their phones).
+// Anything sent at or before the later of the two stays hidden.
+const clearedKey = (team) => `clearcalm:cleared:${team}`;
+const loadCleared = (team) => {
+  try {
+    const v = JSON.parse(localStorage.getItem(clearedKey(team)));
+    return { mine: Number(v?.mine) || 0, team: Number(v?.team) || 0 };
+  } catch {
+    return { mine: 0, team: 0 };
+  }
+};
+const saveCleared = (team, cleared) => {
+  try {
+    localStorage.setItem(clearedKey(team), JSON.stringify(cleared));
+  } catch {
+    // ignore
+  }
+};
+const cutoffOf = (cleared) => Math.max(cleared.mine, cleared.team);
+
 // Merge incoming messages into the list, dropping duplicates and keeping
 // chronological order.
 const mergeMessages = (current, incoming) => {
@@ -433,6 +455,23 @@ export default function useComm() {
     );
   }, []);
 
+  const clearedRef = useRef({ mine: 0, team: 0 });
+
+  // A teammate cleared messages for everyone at time `before`. Returns true
+  // if that's newer than what we had.
+  const applyTeamClear = useCallback((before) => {
+    if (!before || !Number.isFinite(before)) return false;
+    // Never accept a time in the future (it would hide new messages).
+    const cutoff = Math.min(before, now());
+    if (cutoff <= clearedRef.current.team) return false;
+    clearedRef.current.team = cutoff;
+    saveCleared(selfRef.current.team, clearedRef.current);
+    setMessages((prev) =>
+      prev.filter((m) => m.type === "system" || m.ts > cutoff),
+    );
+    return true;
+  }, []);
+
   // Play audio from peers on our channel, or anyone talking to us directly.
   const applyAudio = useCallback(() => {
     const { volume, muted } = outputRef.current;
@@ -554,7 +593,10 @@ export default function useComm() {
       selfRef.current = { team, name, channel, talking: false, to: null };
       failuresRef.current = { count: 0, last: "" };
       setStatus("connecting");
-      setMessages(loadHistory(team));
+      clearedRef.current = loadCleared(team);
+      setMessages(
+        loadHistory(team).filter((m) => m.ts > cutoffOf(clearedRef.current)),
+      );
       // Finish leaving any previous session first; joining the same room
       // while it is still closing would hand back the closing instance.
       if (leavingRef.current) await leavingRef.current;
@@ -609,10 +651,12 @@ export default function useComm() {
       const presenceAction = room.makeAction("pres");
       const chatAction = room.makeAction("chat");
       const historyAction = room.makeAction("hist");
+      const clearAction = room.makeAction("clr");
       actionsRef.current = {
         presence: presenceAction,
         chat: chatAction,
         history: historyAction,
+        clear: clearAction,
       };
 
       room.onPeerJoin = (peerId) => {
@@ -624,8 +668,16 @@ export default function useComm() {
             target: peerId,
           },
         );
+        // Catch the newcomer up: our messages, plus when the team last
+        // cleared them (so their own older copies disappear too).
         const history = messagesRef.current.filter((m) => m.type !== "system");
-        if (history.length) historyAction.send(history, { target: peerId });
+        const clearedBefore = clearedRef.current.team;
+        if (history.length || clearedBefore) {
+          historyAction.send(
+            { messages: history, clearedBefore },
+            { target: peerId },
+          );
+        }
         // A join is always a fresh connection - even for a peer ID we've
         // seen before (their tab reconnected before we noticed them leave) -
         // so replace any mic copy tied to the old connection.
@@ -676,19 +728,39 @@ export default function useComm() {
 
       chatAction.onMessage = (msg) => {
         if (!msg || typeof msg.text !== "string") return;
+        if (!(msg.ts > cutoffOf(clearedRef.current))) return;
         setMessages((prev) =>
           mergeMessages(prev, [{ ...msg, text: msg.text.slice(0, 1000) }]),
         );
       };
 
-      historyAction.onMessage = (list) => {
-        if (!Array.isArray(list)) return;
+      // Older versions send a plain array; newer ones send
+      // { messages, clearedBefore }.
+      historyAction.onMessage = (data) => {
+        const list = Array.isArray(data)
+          ? data
+          : Array.isArray(data?.messages)
+            ? data.messages
+            : [];
+        if (!Array.isArray(data) && data?.clearedBefore) {
+          applyTeamClear(Number(data.clearedBefore));
+        }
+        const cutoff = cutoffOf(clearedRef.current);
         setMessages((prev) =>
           mergeMessages(
             prev,
-            list.filter((m) => m && typeof m.text === "string"),
+            list.filter(
+              (m) => m && typeof m.text === "string" && m.ts > cutoff,
+            ),
           ),
         );
+      };
+
+      clearAction.onMessage = (data, { peerId }) => {
+        const name = peersRef.current[peerId]?.name || "A teammate";
+        if (applyTeamClear(Number(data?.before))) {
+          addSystem(`${name} cleared the messages for everyone`);
+        }
       };
 
       room.onPeerStream = (stream, peerId) => {
@@ -729,7 +801,7 @@ export default function useComm() {
         );
       }
     },
-    [addSystem, applyAudio, sendMicTo, dropMicFor, warnOnce],
+    [addSystem, applyAudio, sendMicTo, dropMicFor, warnOnce, applyTeamClear],
   );
 
   useEffect(() => disconnect, [disconnect]);
@@ -836,10 +908,20 @@ export default function useComm() {
     [applyAudio],
   );
 
-  const clearHistory = useCallback(() => {
+  // Clear messages on this phone ("me") or for the whole team ("team").
+  const clearHistory = useCallback((scope = "me") => {
+    const team = selfRef.current.team;
+    const t = now();
+    if (scope === "team") {
+      clearedRef.current.team = t;
+      actionsRef.current?.clear.send({ before: t });
+    } else {
+      clearedRef.current.mine = t;
+    }
+    saveCleared(team, clearedRef.current);
     setMessages([]);
     try {
-      localStorage.removeItem(storageKey(selfRef.current.team));
+      localStorage.removeItem(storageKey(team));
     } catch {
       // ignore
     }
