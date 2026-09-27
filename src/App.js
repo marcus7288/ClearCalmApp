@@ -439,6 +439,7 @@ const ClearCalmCommApp = () => {
   const [isMuted, setIsMuted] = useState(false);
   const [draft, setDraft] = useState("");
   const [showSettings, setShowSettings] = useState(false);
+  const [directTo, setDirectTo] = useState(null); // peer ID for private talk
   const feedRef = useRef(null);
 
   const isConnected = status === "online";
@@ -456,7 +457,20 @@ const ClearCalmCommApp = () => {
     return acc;
   }, {});
   const onChannel = peerList.filter((p) => p.channel === selectedChannel);
-  const talkers = onChannel.filter((p) => p.talking);
+  const elsewhere = peerList.filter((p) => p.channel !== selectedChannel);
+  // People we can hear right now: channel talk on our channel, or anyone
+  // talking to us directly.
+  const talkers = peerList.filter(
+    (p) =>
+      p.talking &&
+      (p.to === comm.selfId || (!p.to && p.channel === selectedChannel)),
+  );
+  const directPeer = directTo ? peers[directTo] : null;
+
+  // Drop the direct target if that person leaves.
+  useEffect(() => {
+    if (directTo && !peers[directTo]) setDirectTo(null);
+  }, [directTo, peers]);
 
   // Show this channel's messages, system notices, and anything sent to
   // Emergency (which everyone sees, whatever channel they're on).
@@ -481,7 +495,7 @@ const ClearCalmCommApp = () => {
     const down = (e) => {
       if (e.code !== "Space" || e.repeat || typing(e)) return;
       e.preventDefault();
-      startTalking();
+      startTalking(directTo);
     };
     const up = (e) => {
       if (e.code !== "Space" || typing(e)) return;
@@ -496,7 +510,7 @@ const ClearCalmCommApp = () => {
       window.removeEventListener("keyup", up);
       window.removeEventListener("blur", stopTalking);
     };
-  }, [canTalk, startTalking, stopTalking]);
+  }, [canTalk, startTalking, stopTalking, directTo]);
 
   const join = ({ name, team, passcode }) => {
     unlockAudio();
@@ -520,6 +534,7 @@ const ClearCalmCommApp = () => {
 
   const switchChannel = (channelId) => {
     if (transmitting) stopTalking();
+    setDirectTo(null);
     setSelectedChannel(channelId);
     comm.setChannel(channelId);
   };
@@ -546,7 +561,7 @@ const ClearCalmCommApp = () => {
     if (!canTalk) return;
     e.preventDefault();
     e.currentTarget.setPointerCapture?.(e.pointerId);
-    startTalking();
+    startTalking(directTo);
   };
 
   if (!session) return <JoinScreen onJoin={join} />;
@@ -600,18 +615,28 @@ const ClearCalmCommApp = () => {
           <div
             className={`px-2 py-1 rounded text-xs font-medium truncate ${
               transmitting
-                ? "bg-red-600"
+                ? directPeer
+                  ? "bg-purple-600"
+                  : "bg-red-600"
                 : talkers.length
-                  ? "bg-amber-600"
+                  ? talkers.some((t) => t.to === comm.selfId)
+                    ? "bg-purple-600"
+                    : "bg-amber-600"
                   : isConnected
                     ? "bg-green-600"
                     : "bg-slate-600"
             }`}
           >
             {transmitting
-              ? "TRANSMITTING"
+              ? directPeer
+                ? `TALKING TO ${directPeer.name.toUpperCase()}`
+                : "TRANSMITTING"
               : talkers.length
-                ? `${talkers.map((t) => t.name).join(", ")} TALKING`
+                ? `${talkers
+                    .map((t) =>
+                      t.to === comm.selfId ? `${t.name} (to you)` : t.name,
+                    )
+                    .join(", ")} TALKING`
                 : isConnected
                   ? peerList.length
                     ? "READY"
@@ -649,20 +674,42 @@ const ClearCalmCommApp = () => {
           <span className="text-xs px-2 py-1 rounded-full bg-blue-600/30 text-blue-200">
             {session.name} (you)
           </span>
-          {onChannel.map((p) => (
-            <span
-              key={p.id}
-              className={`text-xs px-2 py-1 rounded-full flex items-center gap-1 ${
-                p.talking
-                  ? "bg-amber-500 text-slate-900"
-                  : "bg-slate-700 text-slate-200"
-              }`}
-            >
-              {p.talking && <Mic className="w-3 h-3" />}
-              {p.name}
-            </span>
-          ))}
+          {[...onChannel, ...elsewhere].map((p) => {
+            const hearing =
+              p.talking &&
+              (p.to === comm.selfId ||
+                (!p.to && p.channel === selectedChannel));
+            return (
+              <button
+                key={p.id}
+                onClick={() => setDirectTo(directTo === p.id ? null : p.id)}
+                title={`Talk privately to ${p.name}`}
+                className={`text-xs px-2 py-1 rounded-full flex items-center gap-1 border ${
+                  directTo === p.id
+                    ? "border-purple-400 bg-purple-600 text-white"
+                    : hearing
+                      ? "border-transparent bg-amber-500 text-slate-900"
+                      : p.channel === selectedChannel
+                        ? "border-transparent bg-slate-700 text-slate-200"
+                        : "border-slate-700 bg-transparent text-slate-400"
+                }`}
+              >
+                {hearing && <Mic className="w-3 h-3" />}
+                {p.name}
+                {p.channel !== selectedChannel && (
+                  <span className="opacity-70">
+                    · {p.channel === EMERGENCY_ID ? "Emerg" : `Ch ${p.channel}`}
+                  </span>
+                )}
+              </button>
+            );
+          })}
         </div>
+        {peerList.length > 0 && !directPeer && (
+          <p className="text-xs text-slate-500 mt-2">
+            Tap a name to talk to that person privately.
+          </p>
+        )}
       </div>
 
       {/* Message Feed */}
@@ -737,6 +784,21 @@ const ClearCalmCommApp = () => {
         </button>
       </form>
 
+      {/* Direct (private) talk banner */}
+      {directPeer && (
+        <div className="px-4 py-2 bg-purple-900/60 border-t border-purple-500 flex items-center justify-between gap-2">
+          <span className="text-sm text-purple-100 truncate">
+            <b>Direct to {directPeer.name}</b> - only they will hear you
+          </span>
+          <button
+            onClick={() => setDirectTo(null)}
+            className="text-xs px-2 py-1 rounded bg-purple-700 hover:bg-purple-600 shrink-0"
+          >
+            Back to channel
+          </button>
+        </div>
+      )}
+
       {/* Controls */}
       <div className="p-4 bg-slate-800">
         {/* Volume Control */}
@@ -776,13 +838,21 @@ const ClearCalmCommApp = () => {
               onLostPointerCapture={stopTalking}
               onContextMenu={(e) => e.preventDefault()}
               disabled={!canTalk}
-              aria-label="Hold to talk"
+              aria-label={
+                directPeer
+                  ? `Hold to talk to ${directPeer.name}`
+                  : "Hold to talk"
+              }
               style={{ touchAction: "none", WebkitUserSelect: "none" }}
               className={`w-20 h-20 rounded-full transition-all duration-150 select-none ${
                 transmitting
-                  ? "bg-red-500 scale-110 shadow-lg shadow-red-500/50"
+                  ? directPeer
+                    ? "bg-purple-500 scale-110 shadow-lg shadow-purple-500/50"
+                    : "bg-red-500 scale-110 shadow-lg shadow-red-500/50"
                   : canTalk
-                    ? "bg-blue-600 hover:bg-blue-700"
+                    ? directPeer
+                      ? "bg-purple-600 hover:bg-purple-700"
+                      : "bg-blue-600 hover:bg-blue-700"
                     : "bg-slate-600 cursor-not-allowed"
               }`}
             >
@@ -799,7 +869,9 @@ const ClearCalmCommApp = () => {
                   ? "Starting mic..."
                   : transmitting
                     ? "Release to stop"
-                    : "Hold to talk (or Space)"}
+                    : directPeer
+                      ? `Hold to talk to ${directPeer.name}`
+                      : "Hold to talk (or Space)"}
             </span>
           </div>
 

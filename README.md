@@ -14,6 +14,13 @@ phones and laptops.
   on.
 - **Push to talk.** Hold the big button, or hold the Space bar on a computer.
   A short chirp marks the start and end of each transmission.
+- **Direct (private) talk.** Tap a teammate's name under the channel buttons.
+  The talk button turns purple ("Hold to talk to Sarah"), and only that person
+  hears you, even if they're on a different channel. They hear a two-tone
+  chirp and see "(to you)". Tap "Back to channel" to return to group talk.
+  Each teammate gets a separate copy of your microphone, and only the copies
+  for the people meant to hear you are switched on. So neither direct nor
+  channel audio is ever sent to anyone else's device.
 - **Invite link.** Open Settings and choose "Copy invite link". The link fills
   in the team code and passcode.
 - **Message history** is kept on each device and shared with teammates who
