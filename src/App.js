@@ -207,7 +207,7 @@ const AudioCheck = ({ comm }) => {
       <p className="text-sm text-slate-300 mb-2">Microphone / headphones</p>
       <select
         value={comm.micChoice}
-        onChange={(e) => comm.switchMic(e.target.value)}
+        onChange={(e) => comm.switchMic(e.target.value, { manual: true })}
         disabled={comm.micState !== "ready"}
         className="w-full mb-1 rounded-lg bg-slate-900 border border-slate-600 px-3 py-2 text-sm"
       >
@@ -223,6 +223,9 @@ const AudioCheck = ({ comm }) => {
         same device as the microphone, so choose your Bluetooth headphones here
         to hear through them.
       </p>
+      {comm.micNote && (
+        <p className="text-xs text-amber-300 -mt-3 mb-4">{comm.micNote}</p>
+      )}
 
       <p className="text-sm text-slate-300 mb-2">Audio check</p>
       <div className="flex gap-2">
@@ -347,8 +350,9 @@ const Diagnostics = ({ comm, onReconnect }) => {
         </div>
         <div className="text-slate-400">
           Mic: {diag.micState}
-          {diag.mic ? ` (${diag.mic})` : ""} · TURN relay:{" "}
-          {diag.turn ? `on (${diag.turn})` : "not set up"} · HTTPS:{" "}
+          {diag.mic ? ` (${diag.mic})` : ""}
+          {diag.micSwitches ? ` · mic changed ${diag.micSwitches}x` : ""} · TURN
+          relay: {diag.turn ? `on (${diag.turn})` : "not set up"} · HTTPS:{" "}
           {diag.secure ? "yes" : "no (mic will not work)"} · Screen awake:{" "}
           {diag.wakeLock === "unsupported" ? "not supported" : diag.wakeLock}
         </div>

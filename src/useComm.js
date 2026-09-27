@@ -417,6 +417,8 @@ export default function useComm() {
   const [mics, setMics] = useState([]); // available microphones / headsets
   const [micChoice, setMicChoice] = useState(loadMicChoice); // "auto" | deviceId
   const [activeMic, setActiveMic] = useState(""); // label of the mic in use
+  const [micSwitches, setMicSwitches] = useState(0); // times the mic changed
+  const [micNote, setMicNote] = useState(""); // e.g. auto-switching paused
   const wakeLockRef = useRef(null);
 
   const roomRef = useRef(null);
@@ -951,12 +953,13 @@ export default function useComm() {
       peers: peerRows,
       failures: failuresRef.current,
       mic: activeMic,
+      micSwitches,
       wakeLock,
       micState,
       turn: turnSourceRef.current,
       secure: window.isSecureContext,
     };
-  }, [micState, wakeLock, activeMic]);
+  }, [micState, wakeLock, activeMic, micSwitches]);
 
   // Keep the screen on while connected. A sleeping phone drops off the team
   // (and makes teammates' reconnection attempts fail), which defeats the
@@ -1006,8 +1009,20 @@ export default function useComm() {
   // Switch microphone / headset without dropping the call. iPhones allow one
   // capture at a time, so the old mic is stopped before the new one opens.
   const switchingRef = useRef(false);
+  const switchTimesRef = useRef([]);
+  const autoSwitchPausedRef = useRef(false);
   const switchMic = useCallback(
-    async (choice = loadMicChoice(), { force = false } = {}) => {
+    async (
+      choice = loadMicChoice(),
+      { force = false, manual = false } = {},
+    ) => {
+      if (manual) {
+        autoSwitchPausedRef.current = false;
+        switchTimesRef.current = [];
+        setMicNote("");
+      } else if (autoSwitchPausedRef.current && !force) {
+        return;
+      }
       saveMicChoice(choice);
       setMicChoice(choice);
       const devices = await listMicDevices();
@@ -1016,14 +1031,39 @@ export default function useComm() {
       if (!old || !roomRef.current || switchingRef.current) return;
       const oldTrack = old.getAudioTracks()[0];
       const wanted = resolveMic(choice, devices);
-      const current = oldTrack?.getSettings?.().deviceId;
       const live = oldTrack?.readyState === "live";
+      // Which listed device is the mic in use? Match by ID or by name:
+      // iPhones don't always report the same ID for the track as in the list.
+      const currentId = oldTrack?.getSettings?.().deviceId;
+      const current =
+        devices.find((d) => d.deviceId === currentId) ||
+        devices.find((d) => d.label === oldTrack?.label);
       // Already on the right mic? (With no headphones in "auto", that's
       // anything except a headset that has just gone away.)
       const onRightMic = wanted
-        ? current === wanted
+        ? current?.deviceId === wanted ||
+          (!current && !!currentId && currentId === wanted)
         : !(choice === "auto" && HEADSET_RE.test(oldTrack?.label || ""));
       if (!force && live && onRightMic) return;
+      // Safety valve: if automatic switching keeps flipping the mic (each
+      // switch can itself look like a device change on iPhones), stop
+      // switching automatically. A manual choice still works.
+      if (!manual) {
+        const t = now();
+        switchTimesRef.current = switchTimesRef.current.filter(
+          (x) => t - x < 30000,
+        );
+        if (switchTimesRef.current.length >= 3) {
+          if (!autoSwitchPausedRef.current) {
+            autoSwitchPausedRef.current = true;
+            setMicNote(
+              "Automatic headphone switching paused because the mic kept changing. Pick a mic above if needed.",
+            );
+          }
+          return;
+        }
+        switchTimesRef.current.push(t);
+      }
       switchingRef.current = true;
       try {
         old.getTracks().forEach((t) => {
@@ -1039,6 +1079,11 @@ export default function useComm() {
           routeTo(id, recipientsRef.current.has(id)),
         );
         setActiveMic(track.label || "");
+        setMicSwitches((n) => n + 1);
+        // iPhones can pause playback while the mic changes; restart it.
+        audioHost?.querySelectorAll("audio").forEach((a) => {
+          if (a.paused && a.srcObject) a.play().catch(() => {});
+        });
         setMics(await listMicDevices());
       } catch {
         setMicState("denied");
@@ -1049,21 +1094,24 @@ export default function useComm() {
     [routeTo],
   );
 
-  // Once connected (and whenever headphones connect or disconnect), follow the
+  // Once connected, and whenever headphones connect or disconnect, follow the
   // chosen mic - in "auto", that means headphones whenever they're present.
   useEffect(() => {
     if (micState !== "ready") return undefined;
     switchMic();
     const onChange = () => switchMic();
     navigator.mediaDevices?.addEventListener?.("devicechange", onChange);
-    // If the mic in use disappears (headphones switched off), reopen one.
+    return () =>
+      navigator.mediaDevices?.removeEventListener?.("devicechange", onChange);
+  }, [micState, switchMic]);
+
+  // If the mic in use disappears (headphones switched off), reopen one.
+  useEffect(() => {
+    if (micState !== "ready") return undefined;
     const track = streamRef.current?.getAudioTracks()[0];
     const onEnded = () => switchMic(undefined, { force: true });
     track?.addEventListener("ended", onEnded);
-    return () => {
-      navigator.mediaDevices?.removeEventListener?.("devicechange", onChange);
-      track?.removeEventListener("ended", onEnded);
-    };
+    return () => track?.removeEventListener("ended", onEnded);
   }, [micState, activeMic, switchMic]);
 
   // Mic level meter for Settings. The mic track is switched on while testing,
@@ -1128,6 +1176,7 @@ export default function useComm() {
     micChoice,
     activeMic,
     switchMic,
+    micNote,
     getLatency,
     status,
     peers,
