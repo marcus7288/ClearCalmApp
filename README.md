@@ -68,6 +68,34 @@ The build number at the bottom of the join screen and in Settings (for example
 `v2 · a1b2c3d`) matches the Git commit Netlify deployed. If you don't see it,
 Netlify is still serving the old version.
 
+### Supabase for introductions (recommended, more reliable)
+
+By default phones find each other through free public Nostr relays run by
+volunteers, which aren't always reliable. Supabase (free tier) does the same
+job from one managed service. Only the short "introduction" messages go
+through it; voice and text still travel directly between phones.
+
+1. Create a free account at supabase.com and a **New project** (any name,
+   any region near you; save the database password somewhere, though the
+   app doesn't need it).
+2. Open **Project Settings -> API** (or **Data API**) and copy the
+   **Project URL** and the **anon public** key.
+3. In Netlify, open **Site configuration -> Environment variables** and add:
+   - `REACT_APP_SUPABASE_URL` = the Project URL (e.g. `https://abcd1234.supabase.co`)
+   - `REACT_APP_SUPABASE_ANON_KEY` = the anon public key
+4. **Deploys -> Trigger deploy -> Deploy site.** Everyone reopens the app.
+   Settings -> Connection shows **"Introductions: Supabase - reachable"**.
+
+The anon key is designed to be public, so it's fine for it to be in the page.
+Every phone must be on the same build, because phones on Supabase and phones
+on the Nostr relays can't see each other.
+
+Free Supabase projects **pause after about a week without use**. If Settings
+shows "Introductions: Supabase - unreachable", sign in to supabase.com and
+click **Restore project**. If you use the app less than weekly, open it (or
+the Supabase dashboard) once a week, or remove the two variables to go back
+to the public relays.
+
 ### TURN relay (needed when some phones can't reach each other)
 
 Each phone links directly to every other phone. Some network pairs can't
@@ -104,6 +132,7 @@ into the page where anyone can read them, so the function above is safer.
 
 | What you see | What it means / what to do |
 | --- | --- |
+| Introductions: Supabase - unreachable | The Supabase project is paused or down. Restore it at supabase.com. |
 | Relays: 0 connected | This network blocks the introduction servers. Try other Wi-Fi or cellular data. |
 | Relays OK, Teammates connected: 0 | Team code or passcode doesn't match, or the other device isn't open. |
 | Teammate shows `failed` / `connecting` | The networks can't connect directly. Add a TURN relay (above). |

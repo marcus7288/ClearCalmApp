@@ -302,17 +302,33 @@ const Diagnostics = ({ comm, onReconnect }) => {
     };
   }, [comm]);
 
-  const relaysUp = diag.relays.filter((r) => r.state === "connected").length;
+  const relaysUp =
+    diag.signaling === "supabase"
+      ? Number(diag.signalStatus === "reachable")
+      : diag.relays.filter((r) => r.state === "connected").length;
 
   return (
     <div>
       <p className="text-sm text-slate-300 mb-2">Connection</p>
       <div className="rounded-lg bg-slate-900 p-3 text-xs space-y-2">
         <div>
-          <span className={relaysUp ? "text-green-400" : "text-red-400"}>
-            Relays: {relaysUp} of {diag.relays.length} connected
-          </span>
-          {!relaysUp && (
+          {diag.signaling === "supabase" ? (
+            <span className={relaysUp ? "text-green-400" : "text-red-400"}>
+              Introductions: Supabase - {diag.signalStatus || "starting"}
+            </span>
+          ) : (
+            <span className={relaysUp ? "text-green-400" : "text-red-400"}>
+              Relays: {relaysUp} of {diag.relays.length} connected
+            </span>
+          )}
+          {diag.signaling === "supabase" &&
+            /unreachable/.test(diag.signalStatus) && (
+              <p className="text-slate-400">
+                Can't reach Supabase. If the project was paused (free projects
+                pause after a week unused), restore it at supabase.com.
+              </p>
+            )}
+          {diag.signaling !== "supabase" && !relaysUp && (
             <p className="text-slate-400">
               Can't reach any relay - this network may block them. Try another
               Wi-Fi network or cellular data.
