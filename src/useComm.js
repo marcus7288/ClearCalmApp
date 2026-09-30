@@ -56,6 +56,42 @@ const probeSupabase = async () => {
   }
 };
 
+// Ask Supabase Realtime directly whether it will let us use a broadcast
+// channel, and report its own answer (e.g. a refusal when the project only
+// allows private channels).
+const probeRealtime = async () => {
+  let client;
+  try {
+    const { createClient } = await import("@supabase/supabase-js");
+    client = createClient(SUPABASE_URL, SUPABASE_KEY, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
+    return await new Promise((resolve) => {
+      const timer = setTimeout(() => resolve("no answer (timed out)"), 8000);
+      client.channel("clearcalm-probe").subscribe((status, err) => {
+        if (status === "SUBSCRIBED") {
+          clearTimeout(timer);
+          resolve("OK");
+        } else if (["CHANNEL_ERROR", "TIMED_OUT", "CLOSED"].includes(status)) {
+          clearTimeout(timer);
+          resolve(
+            `refused - ${status}${err?.message ? `: ${err.message}` : ""}`,
+          );
+        }
+      });
+    });
+  } catch (err) {
+    return `error - ${err?.message || err}`;
+  } finally {
+    try {
+      client?.removeAllChannels();
+      client?.realtime.disconnect();
+    } catch {
+      // ignore
+    }
+  }
+};
+
 // Optional TURN relay for networks that block direct connections (common on
 // cellular data). Set these as environment variables in Netlify.
 const TURN_URLS = envList(process.env.REACT_APP_TURN_URLS);
@@ -691,7 +727,10 @@ export default function useComm() {
         config.appId = SUPABASE_URL;
         config.relayConfig = { supabaseKey: SUPABASE_KEY };
         setSignalStatus("checking");
-        probeSupabase().then(setSignalStatus);
+        Promise.all([probeSupabase(), probeRealtime()]).then(
+          ([health, realtime]) =>
+            setSignalStatus(`${health} · realtime ${realtime}`),
+        );
         ({ joinRoom: join } = await import("@trystero-p2p/supabase"));
         if (roomRef.current) return;
       }

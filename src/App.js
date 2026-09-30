@@ -304,7 +304,7 @@ const Diagnostics = ({ comm, onReconnect }) => {
 
   const relaysUp =
     diag.signaling === "supabase"
-      ? Number(diag.signalStatus === "reachable")
+      ? Number(/realtime OK/.test(diag.signalStatus || ""))
       : diag.relays.filter((r) => r.state === "connected").length;
 
   return (
@@ -321,6 +321,13 @@ const Diagnostics = ({ comm, onReconnect }) => {
               Relays: {relaysUp} of {diag.relays.length} connected
             </span>
           )}
+          {diag.signaling === "supabase" &&
+            /realtime (refused|no answer)/.test(diag.signalStatus || "") && (
+              <p className="text-slate-400">
+                Supabase won't open the app's channel. In Supabase, go to
+                Realtime - Settings and turn on "Allow public access".
+              </p>
+            )}
           {diag.signaling === "supabase" &&
             /unreachable/.test(diag.signalStatus) && (
               <p className="text-slate-400">
