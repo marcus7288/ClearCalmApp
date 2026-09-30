@@ -29,6 +29,33 @@ const RELAY_URLS = envList(process.env.REACT_APP_NOSTR_RELAYS).length
       "wss://offchain.pub",
     ];
 
+// Optional: use Supabase (a managed service with a free tier) to introduce
+// phones to each other instead of the public Nostr relays above, which are
+// run by volunteers and aren't always reliable. Set both in Netlify.
+// The anon key is designed to be public.
+const SUPABASE_URL = (process.env.REACT_APP_SUPABASE_URL || "")
+  .trim()
+  .replace(/\/+$/, "");
+const SUPABASE_KEY = (process.env.REACT_APP_SUPABASE_ANON_KEY || "").trim();
+export const SIGNALING = SUPABASE_URL && SUPABASE_KEY ? "supabase" : "nostr";
+
+// Is the Supabase project up? (Free projects pause after a week unused.)
+const probeSupabase = async () => {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 6000);
+  try {
+    const res = await fetch(`${SUPABASE_URL}/auth/v1/health`, {
+      headers: { apikey: SUPABASE_KEY },
+      signal: ctrl.signal,
+    });
+    return res.ok ? "reachable" : `unreachable (HTTP ${res.status})`;
+  } catch {
+    return "unreachable";
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
 // Optional TURN relay for networks that block direct connections (common on
 // cellular data). Set these as environment variables in Netlify.
 const TURN_URLS = envList(process.env.REACT_APP_TURN_URLS);
@@ -460,6 +487,7 @@ export default function useComm() {
   const [micState, setMicState] = useState("off"); // off | ready | denied
   const [transmitting, setTransmitting] = useState(false);
   const [wakeLock, setWakeLock] = useState("off"); // on | off | unsupported
+  const [signalStatus, setSignalStatus] = useState(""); // Supabase reachability
   const [mics, setMics] = useState([]); // available microphones / headsets
   const [micChoice, setMicChoice] = useState(loadMicChoice); // "auto" | deviceId
   const [activeMic, setActiveMic] = useState(""); // label of the mic in use
@@ -656,6 +684,17 @@ export default function useComm() {
         appId: APP_ID,
         relayConfig: { urls: RELAY_URLS },
       };
+      // Introductions via Supabase when configured; the Supabase code is only
+      // downloaded in that case.
+      let join = joinRoom;
+      if (SIGNALING === "supabase") {
+        config.appId = SUPABASE_URL;
+        config.relayConfig = { supabaseKey: SUPABASE_KEY };
+        setSignalStatus("checking");
+        probeSupabase().then(setSignalStatus);
+        ({ joinRoom: join } = await import("@trystero-p2p/supabase"));
+        if (roomRef.current) return;
+      }
       const turnServers = [...(TURN_CONFIG || []), ...turn.iceServers];
       if (turnServers.length) config.turnConfig = turnServers;
       turnSourceRef.current = turn.provider
@@ -665,7 +704,7 @@ export default function useComm() {
           : null;
       if (passcode) config.password = passcode;
 
-      const room = joinRoom(config, team, {
+      const room = join(config, team, {
         // Individual connection attempts fail routinely (a phone going to
         // sleep mid-handshake, an old tab left open, a network switch) and
         // the library retries on its own. Only warn when it matters: a
@@ -979,8 +1018,9 @@ export default function useComm() {
 
   // Snapshot of connection health for the diagnostics panel.
   const getDiagnostics = useCallback(() => {
-    const sockets = roomRef.current ? getRelaySockets() : {};
-    const relays = RELAY_URLS.map((url) => {
+    const sockets =
+      roomRef.current && SIGNALING === "nostr" ? getRelaySockets() : {};
+    const relays = (SIGNALING === "nostr" ? RELAY_URLS : []).map((url) => {
       const ws = sockets[url];
       const state = ws
         ? ["connecting", "connected", "closing", "closed"][ws.readyState]
@@ -998,6 +1038,8 @@ export default function useComm() {
     });
     return {
       relays,
+      signaling: SIGNALING,
+      signalStatus,
       peers: peerRows,
       failures: failuresRef.current,
       mic: activeMic,
@@ -1007,7 +1049,7 @@ export default function useComm() {
       turn: turnSourceRef.current,
       secure: window.isSecureContext,
     };
-  }, [micState, wakeLock, activeMic, micSwitches]);
+  }, [micState, wakeLock, activeMic, micSwitches, signalStatus]);
 
   // Keep the screen on while connected. A sleeping phone drops off the team
   // (and makes teammates' reconnection attempts fail), which defeats the
